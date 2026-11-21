@@ -32,7 +32,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::events::{Bus, Filter, FlowStore};
 use crate::intercept::{Pauses, Resolution};
 use crate::proxy::{Proxy, RemoteAccess, check_listen};
-use crate::rules::Rules;
+use crate::rules::{Rules, file_name};
 use crate::rules_api;
 
 /// The cookie the UI page may set after reading the token from the URL fragment.
@@ -387,7 +387,8 @@ struct Resolved {
     resolved: u64,
 }
 
-/// The answer of `GET /api/v1/info`: what the UI's Connect popover shows.
+/// The answer of `GET /api/v1/info`: what the UI's Connect popover shows. The rules and
+/// session files appear by file name only: a full path would show the home directory.
 #[derive(Serialize)]
 struct Info<'a> {
     name: &'static str,
@@ -395,8 +396,8 @@ struct Info<'a> {
     proxy_addr: SocketAddr,
     magic_host: &'static str,
     ca_fingerprint_sha256: &'a str,
-    rules_file: Option<PathBuf>,
-    session_file: Option<&'a PathBuf>,
+    rules_file: Option<String>,
+    session_file: Option<String>,
     listen_is_loopback: bool,
 }
 
@@ -418,8 +419,10 @@ impl State {
             proxy_addr: self.proxy_addr,
             magic_host: crate::MAGIC_HOST,
             ca_fingerprint_sha256: &self.ca_fingerprint,
-            rules_file: self.rules.get().and_then(|rules| rules.report().file),
-            session_file: self.session_file.get(),
+            rules_file: (self.rules.get())
+                .and_then(|rules| rules.report().file)
+                .map(|file| file_name(&file)),
+            session_file: self.session_file.get().map(|file| file_name(file)),
             listen_is_loopback: self.proxy_addr.ip().is_loopback(),
         }
     }
