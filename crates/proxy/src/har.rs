@@ -909,6 +909,7 @@ fn exchange(id: u64, entry: Entry) -> Exchange {
         upstream_url: None,
         replay_of: None,
         ws_messages: (!web_socket_messages.is_empty()).then_some(web_socket_messages.len() as u64),
+        response_trailers: Vec::new(),
     }
 }
 

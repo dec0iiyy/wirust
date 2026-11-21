@@ -70,6 +70,10 @@ pub struct Exchange {
     /// (`docs/websocket.md`). Omitted when `None`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub ws_messages: Option<u64>,
+    /// Response trailers (HTTP/2, or chunked HTTP/1.1), at most 64 fields and 16 KiB; gRPC
+    /// puts `grpc-status` here. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub response_trailers: Vec<(String, String)>,
 }
 
 /// Something the interceptor chain did to an exchange. Serialised as its [`Display`] text,

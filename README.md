@@ -109,6 +109,7 @@ profile. Limits, from the platforms' documentation:
 | Replay and compose | send a captured request again, changed or not, from the CLI or the API; [docs/replay.md](docs/replay.md) |
 | Sessions and HAR | append flows to a JSON Lines session file; export HAR 1.2 from the UI or CLI, import HAR from browser dev tools |
 | WebSocket | text, binary and control messages of HTTP/1.1 WebSockets, with a Messages tab; [docs/websocket.md](docs/websocket.md) |
+| gRPC, protobuf | schema-less decoding of gRPC, gRPC-Web and protobuf messages, `grpc-status` from trailers, a gRPC tab; [docs/grpc.md](docs/grpc.md) |
 | TLS passthrough | relay chosen hosts undecrypted (`--passthrough`, `--decrypt-only`); [docs/passthrough.md](docs/passthrough.md) |
 | Phones | QR-code setup with per-device approval, adb setup for Android; [docs/mobile.md](docs/mobile.md) |
 
@@ -125,12 +126,12 @@ official pages do not say.
 | Breakpoints | yes | yes (paid tiers) | yes | yes |
 | WebSocket | yes (HTTP/1.1) | yes | yes | yes |
 | Scripting | no | JavaScript | | Python |
-| gRPC, protobuf views | no | protobuf | protobuf | yes |
+| gRPC, protobuf views | yes (schema-less) | protobuf | protobuf | yes |
 | HTTP/3 | no | | | yes |
 | Sets the system proxy | no | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
 | Client JA4, JA3 | yes | | | |
 
-Not in wirust yet: a native app, scripting, gRPC and protobuf views, HTTP/3, system proxy
+Not in wirust yet: a native app, scripting, `.proto`-aware gRPC views, HTTP/3, system proxy
 setup, an upstream proxy. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Security
@@ -180,7 +181,7 @@ option.
 ## Documentation
 
 [docs/README.md](docs/README.md) lists every document: the UI, rules, HAR and search, replay,
-passthrough, WebSocket, phones, architecture, design, roadmap and releasing.
+passthrough, WebSocket, gRPC, phones, architecture, design, roadmap and releasing.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers building, testing and where code goes.
 
 ## Status

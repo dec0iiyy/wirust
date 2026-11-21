@@ -6,6 +6,7 @@
 - [replay.md](replay.md): sending a captured request again, changed or composed from scratch.
 - [passthrough.md](passthrough.md): relaying chosen hosts undecrypted, with their TLS fingerprint still recorded.
 - [websocket.md](websocket.md): WebSocket message capture and its limits.
+- [grpc.md](grpc.md): schema-less gRPC, gRPC-Web and protobuf decoding, trailers and its limits.
 - [mobile.md](mobile.md): connecting Android and iOS devices, and what they will not let you see.
 - [architecture.md](architecture.md): module map, one exchange step by step, the flow schema, extension seams.
 - [design.md](design.md): design decisions and what they cost.

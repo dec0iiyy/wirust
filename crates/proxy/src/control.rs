@@ -78,6 +78,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         "text/css; charset=utf-8",
         include_bytes!("../ui/ws.css"),
     ),
+    (
+        "/grpc.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../ui/grpc.js"),
+    ),
+    (
+        "/grpc.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../ui/grpc.css"),
+    ),
 ];
 
 type ControlBody = UnsyncBoxBody<Bytes, Infallible>;
@@ -284,6 +294,9 @@ fn module_routes(
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
     }
     if let Some(response) = crate::har_api::route(&state.store, method, segments, query) {
+        return Some(response.map(|body| Full::new(body).boxed_unsync()));
+    }
+    if let Some(response) = crate::grpc_api::route(&state.store, method, segments) {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
     }
     if let Some((status, body)) = rules_api::route(

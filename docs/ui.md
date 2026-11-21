@@ -3,7 +3,8 @@
 Start the proxy with `--ui 127.0.0.1:8081` and open the link it prints
 (`http://127.0.0.1:8081/#token=...`). The UI is static files in `crates/proxy/ui/`
 (`index.html`, `app.js` for the list and detail pane, `panels.js` for the side panel and
-popovers, `style.css`, and `ws.js` with `ws.css` for the WebSocket Messages tab), embedded
+popovers, `style.css`, `ws.js` with `ws.css` for the WebSocket Messages tab, and `grpc.js`
+with `grpc.css` for the gRPC tab, see `docs/grpc.md`), embedded
 in the binary and listed in `control::ASSETS`. No build step, no dependencies.
 
 ## What it shows

@@ -1,0 +1,20 @@
+/* The "gRPC" detail tab (grpc.js). */
+.grpc-head { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; margin: 0 0 8px; }
+.grpc-method { font-family: var(--mono); font-weight: 600; word-break: break-all; }
+.grpc-status { font-family: var(--mono); }
+.grpc-status.ok { color: var(--ok); }
+.grpc-status.bad { color: var(--server-err); }
+.grpc-note { color: var(--fg-dim); margin: 4px 0; }
+.grpc-error { color: var(--server-err); margin: 4px 0; }
+.grpc-section { margin: 12px 0 0; }
+.grpc-section > h3 { font-size: 1em; margin: 0 0 4px; }
+.grpc-msg { border: 1px solid var(--line); border-radius: 4px; margin: 4px 0; padding: 2px 8px; }
+.grpc-msg > summary { cursor: pointer; font-family: var(--mono); }
+.grpc-tree, .grpc-tree ul { list-style: none; margin: 0; padding-left: 16px; font-family: var(--mono); }
+.grpc-tree details > summary { cursor: pointer; }
+.grpc-num { font-weight: 600; }
+.grpc-wire { color: var(--fg-dim); }
+.grpc-str { color: var(--client-err); word-break: break-all; white-space: pre-wrap; }
+.grpc-val { word-break: break-all; }
+.grpc-trailers { border-collapse: collapse; font-family: var(--mono); }
+.grpc-trailers td { padding: 1px 12px 1px 0; vertical-align: top; word-break: break-all; }

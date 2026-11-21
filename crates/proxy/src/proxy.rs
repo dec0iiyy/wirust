@@ -759,7 +759,10 @@ where
         let response_capture = Arc::clone(&response_capture);
         Box::new(move |error| {
             record.request_body = BodyRecord::from(&*lock(&request_capture));
-            record.response_body = Some(BodyRecord::from(&*lock(&response_capture)));
+            let response = lock(&response_capture);
+            record.response_body = Some(BodyRecord::from(&*response));
+            record.response_trailers = response.trailers().to_vec();
+            drop(response);
             record.timing.total_ms = ms(start.elapsed());
             record.error = error;
             bus.publish(FlowEvent::finished(Event::Exchange(Box::new(record))));
@@ -833,6 +836,7 @@ fn start_record<B>(
         upstream_url: None,
         replay_of: tag.and_then(|tag| tag.of),
         ws_messages: None,
+        response_trailers: Vec::new(),
     };
     state.bus.publish(FlowEvent::Started(Arc::new(Started {
         schema_version: SCHEMA_VERSION,
