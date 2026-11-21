@@ -171,7 +171,7 @@ impl HarWsMessage {
                 self.data.clone().into_bytes()
             },
             size: 0,
-            compressed: false,
+            compression: None,
         };
         let direction = if self.kind == "send" {
             Direction::ClientToServer
@@ -800,6 +800,16 @@ impl std::error::Error for ImportHarError {
 /// Fails on input over [`MAX_HAR_BYTES`] or [`MAX_HAR_ENTRIES`], and on input that is not
 /// JSON shaped like a HAR document (the error names the line and column).
 pub fn from_har(document: &[u8]) -> Result<Vec<Flow>, ImportHarError> {
+    from_har_with_ws(document).map(|(flows, _)| flows)
+}
+
+/// [`from_har`] plus the `_webSocketMessages` of each entry as messages of its flow,
+/// numbered from 0 per flow; entries with an unknown opcode are skipped.
+///
+/// # Errors
+///
+/// As [`from_har`].
+pub fn from_har_with_ws(document: &[u8]) -> Result<(Vec<Flow>, Vec<WsMessage>), ImportHarError> {
     if document.len() > MAX_HAR_BYTES {
         return Err(ImportHarError::TooLarge {
             size: document.len(),
@@ -811,10 +821,19 @@ pub fn from_har(document: &[u8]) -> Result<Vec<Flow>, ImportHarError> {
             entries: har.log.entries.len(),
         });
     }
-    Ok((1..)
+    let mut messages = Vec::new();
+    let flows = (1..)
         .zip(har.log.entries)
-        .map(|(id, entry)| Flow::new(Event::Exchange(Box::new(exchange(id, entry)))))
-        .collect())
+        .map(|(id, entry)| {
+            messages.extend(
+                (0..)
+                    .zip(&entry.web_socket_messages)
+                    .filter_map(|(seq, m)| m.to_message(id, seq)),
+            );
+            Flow::new(Event::Exchange(Box::new(exchange(id, entry))))
+        })
+        .collect();
+    Ok((flows, messages))
 }
 
 fn body(text: String, encoding: Option<&str>, declared: i64) -> BodyRecord {

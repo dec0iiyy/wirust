@@ -1,18 +1,45 @@
 //! Session files: finished flows as JSON Lines, one [`Flow`] per line, the same
-//! serialisation as `--json` (with `schema_version`).
+//! serialisation as `--json` (with `schema_version`), and WebSocket messages as
+//! [`WsRecord`] lines (`"type": "ws_message"`) after the flow they belong to.
 //!
 //! Session files hold whatever the traffic held: bearer tokens, cookies, passwords in form
 //! bodies. They are created readable by the owner only (mode 0600 on unix).
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read as _, Write as _};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Context as _;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::events::{Flow, FlowEvent, SCHEMA_VERSION};
 use crate::query::Query;
+use crate::ws::{WsMessage, WsStore};
+
+/// The `type` of a WebSocket message line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WsRecordType {
+    /// `ws_message`.
+    WsMessage,
+}
+
+/// One WebSocket message as a session line: `schema_version`, `"type": "ws_message"` and
+/// the [`WsMessage`] fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsRecord {
+    /// The schema version of this record.
+    pub schema_version: u32,
+    /// Always [`WsRecordType::WsMessage`].
+    #[serde(rename = "type")]
+    pub kind: WsRecordType,
+    /// The message; its fields are flattened into this object.
+    #[serde(flatten)]
+    pub message: WsMessage,
+}
 
 /// Longest line [`read`] accepts, in bytes.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -61,13 +88,30 @@ impl SessionWriter {
     ///
     /// Fails when writing fails.
     pub fn append(&mut self, flow: &Flow) -> io::Result<()> {
-        serde_json::to_writer(&mut self.file, flow)?;
+        self.line(flow)
+    }
+
+    /// Writes one WebSocket message as a [`WsRecord`] line and flushes it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when writing fails.
+    pub fn append_message(&mut self, message: &WsMessage) -> io::Result<()> {
+        self.line(&WsRecord {
+            schema_version: SCHEMA_VERSION,
+            kind: WsRecordType::WsMessage,
+            message: message.clone(),
+        })
+    }
+
+    fn line(&mut self, record: &impl Serialize) -> io::Result<()> {
+        serde_json::to_writer(&mut self.file, record)?;
         self.file.write_all(b"\n")?;
         self.file.flush()
     }
 
-    /// Appends every finished flow from `events` on a blocking thread until the bus closes
-    /// or a write fails; failures and lagging are reported on stderr.
+    /// Appends every finished flow and WebSocket message from `events` on a blocking thread
+    /// until the bus closes or a write fails; failures and lagging are reported on stderr.
     #[must_use = "the task runs on its own; keep the handle only to wait for it"]
     pub fn follow(
         mut self,
@@ -77,9 +121,12 @@ impl SessionWriter {
             loop {
                 match events.blocking_recv() {
                     Ok(event) => {
-                        if let Some(flow) = event.flow()
-                            && let Err(e) = self.append(flow)
-                        {
+                        let written = match (&event, event.flow()) {
+                            (_, Some(flow)) => self.append(flow),
+                            (FlowEvent::WsMessage(message), None) => self.append_message(message),
+                            _ => Ok(()),
+                        };
+                        if let Err(e) = written {
                             eprintln!("{}: writing the session file: {e}", crate::NAME);
                             break;
                         }
@@ -102,6 +149,8 @@ impl SessionWriter {
 pub struct Session {
     /// Flows in file order.
     pub flows: Vec<Flow>,
+    /// WebSocket messages in file order.
+    pub messages: Vec<WsMessage>,
     /// Problems that did not stop reading: a truncated last line, a newer schema.
     pub warnings: Vec<String>,
 }
@@ -110,8 +159,8 @@ pub struct Session {
 ///
 /// # Errors
 ///
-/// Fails when the file cannot be read, a line other than the last is not a flow record, or
-/// a line is longer than [`MAX_LINE`].
+/// Fails when the file cannot be read, a line other than the last is neither a flow record
+/// nor a message record, or a line is longer than [`MAX_LINE`].
 pub fn read(path: &Path) -> io::Result<Session> {
     let file = File::open(path)?;
     read_from(BufReader::new(file))
@@ -143,17 +192,24 @@ pub fn read_from(mut reader: impl BufRead) -> io::Result<Session> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_slice::<Flow>(&line) {
-            Ok(flow) => {
-                if flow.schema_version > SCHEMA_VERSION && !newer {
+        let parsed = serde_json::from_slice::<Flow>(&line)
+            .map(|flow| (flow.schema_version, Some(flow), None))
+            .or_else(|e| {
+                serde_json::from_slice::<WsRecord>(&line)
+                    .map(|r| (r.schema_version, None, Some(r.message)))
+                    .map_err(|_| e)
+            });
+        match parsed {
+            Ok((version, flow, message)) => {
+                if version > SCHEMA_VERSION && !newer {
                     newer = true;
                     session.warnings.push(format!(
-                        "line {number}: schema_version {} is newer than {SCHEMA_VERSION}; \
-                         fields this version does not know are ignored",
-                        flow.schema_version
+                        "line {number}: schema_version {version} is newer than \
+                         {SCHEMA_VERSION}; fields this version does not know are ignored"
                     ));
                 }
-                session.flows.push(flow);
+                session.flows.extend(flow);
+                session.messages.extend(message);
             }
             Err(e) if !complete => {
                 session.warnings.push(format!(
@@ -172,8 +228,8 @@ fn invalid(message: String) -> io::Error {
 }
 
 /// Reads flows from `source` (stdin when `None`), printing warnings on stderr, and keeps
-/// those matching `filter`.
-fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<Vec<Flow>> {
+/// those matching `filter`, with their WebSocket messages in a store.
+fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow>, WsStore)> {
     let query = filter.map(Query::parse).transpose()?;
     let session = match source {
         Some(path) => read(path)?,
@@ -182,21 +238,35 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<Vec<Flow>
     for warning in &session.warnings {
         eprintln!("{}: warning: {warning}", crate::NAME);
     }
-    Ok(session
+    let ws = WsStore::new(usize::MAX);
+    for message in session.messages {
+        ws.push(Arc::new(message));
+    }
+    let flows = session
         .flows
         .into_iter()
-        .filter(|flow| query.as_ref().is_none_or(|q| q.matches_flow(flow)))
-        .collect())
+        .filter(|flow| {
+            query
+                .as_ref()
+                .is_none_or(|q| q.matches_flow_with_ws(flow, Some(&ws)))
+        })
+        .collect();
+    Ok((flows, ws))
 }
 
-/// `NAME view`: prints the flows of a session file as the live text log does.
+/// `NAME view`: prints the flows of a session file as the live text log does, each
+/// WebSocket upgrade followed by its messages as `--ws-log` prints them.
 ///
 /// # Errors
 ///
 /// Fails on a bad filter, an unreadable session file, or a write error.
 pub fn view(session: &Path, filter: Option<&str>, out: &mut impl io::Write) -> anyhow::Result<()> {
-    for flow in load(Some(session), filter)? {
+    let (flows, ws) = load(Some(session), filter)?;
+    for flow in flows {
         writeln!(out, "{}", flow.record)?;
+        for message in ws.list(flow.id(), None, usize::MAX) {
+            writeln!(out, "  {}", crate::ws::log_line(&message))?;
+        }
     }
     Ok(())
 }
@@ -212,8 +282,8 @@ pub fn export_har(
     filter: Option<&str>,
     out: &Path,
 ) -> anyhow::Result<usize> {
-    let flows = load(session, filter)?;
-    let har = crate::har::to_har(&flows);
+    let (flows, ws) = load(session, filter)?;
+    let har = crate::har::to_har_with_ws(&flows, Some(&ws));
     let entries = har.log.entries.len();
     if out == Path::new("-") {
         let mut stdout = io::stdout().lock();
@@ -237,8 +307,8 @@ pub fn export_har(
     Ok(entries)
 }
 
-/// `NAME import --har`: converts a HAR file to a new session file. Returns the number of
-/// flows written.
+/// `NAME import --har`: converts a HAR file to a new session file, `_webSocketMessages`
+/// included as message records. Returns the number of flows written.
 ///
 /// # Errors
 ///
@@ -250,11 +320,19 @@ pub fn import_har(har: &Path, session: &Path) -> anyhow::Result<usize> {
         .with_context(|| format!("opening {}", har.display()))?
         .take(limit)
         .read_to_end(&mut document)?;
-    let flows = crate::har::from_har(&document).with_context(|| har.display().to_string())?;
+    let (flows, messages) =
+        crate::har::from_har_with_ws(&document).with_context(|| har.display().to_string())?;
+    let mut by_flow: HashMap<u64, Vec<WsMessage>> = HashMap::new();
+    for message in messages {
+        by_flow.entry(message.flow_id).or_default().push(message);
+    }
     let mut writer = SessionWriter::create(session, Existing::Refuse)
         .with_context(|| format!("creating {} (it must not exist yet)", session.display()))?;
     for flow in &flows {
         writer.append(flow)?;
+        for message in by_flow.remove(&flow.id()).unwrap_or_default() {
+            writer.append_message(&message)?;
+        }
     }
     Ok(flows.len())
 }
@@ -331,6 +409,69 @@ mod tests {
         assert_eq!(session.warnings.len(), 2, "{:?}", session.warnings);
         assert!(session.warnings[0].contains("newer"));
         assert!(session.warnings[1].contains("truncated"));
+        Ok(())
+    }
+
+    fn ws_message(flow_id: u64, seq: u64, text: &str) -> WsMessage {
+        let parsed = crate::ws::Parsed {
+            kind: crate::ws::Kind::Text,
+            kept: text.as_bytes().to_vec(),
+            size: text.len() as u64,
+            compression: None,
+        };
+        crate::ws::message(flow_id, seq, crate::ws::Direction::ClientToServer, &parsed)
+    }
+
+    fn ws_flow(id: u64) -> Flow {
+        let mut x = exchange(id, "GET", "https://a.test/socket", 101);
+        x.ws_messages = Some(0);
+        Flow::new(Event::Exchange(Box::new(x)))
+    }
+
+    #[test]
+    fn messages_round_trip_through_view_export_and_import() -> anyhow::Result<()> {
+        let dir = temp_dir("ws");
+        let path = dir.join("s.jsonl");
+        let mut writer = SessionWriter::create(&path, Existing::Append)?;
+        writer.append(&ws_flow(1))?;
+        writer.append_message(&ws_message(1, 0, "hello"))?;
+        writer.append(&flow(2))?;
+        writer.append_message(&ws_message(1, 1, "world"))?;
+        drop(writer);
+        let text = std::fs::read_to_string(&path)?;
+        let message_line = text.lines().nth(1).unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(message_line)?;
+        assert_eq!(
+            (value["type"].as_str(), value["schema_version"].as_u64()),
+            (Some("ws_message"), Some(1))
+        );
+        let session = read(&path)?;
+        assert_eq!(session.flows.len(), 2);
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].data, "world");
+
+        let mut out = Vec::new();
+        view(&path, Some("ws:world"), &mut out)?;
+        let printed = String::from_utf8(out)?;
+        assert_eq!(printed.lines().count(), 3, "{printed}");
+        assert!(printed.contains("ws #1 -> text 5 B"), "{printed}");
+
+        let har = dir.join("out.har");
+        assert_eq!(export_har(Some(&path), None, &har)?, 2);
+        let document: serde_json::Value = serde_json::from_slice(&std::fs::read(&har)?)?;
+        let sent = &document["log"]["entries"][0]["_webSocketMessages"];
+        assert_eq!(sent.as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            (sent[0]["type"].as_str(), sent[0]["data"].as_str()),
+            (Some("send"), Some("hello"))
+        );
+
+        let imported = dir.join("imported.jsonl");
+        assert_eq!(import_har(&har, &imported)?, 2);
+        let back = read(&imported)?;
+        let data: Vec<&str> = back.messages.iter().map(|m| m.data.as_str()).collect();
+        assert_eq!(data, ["hello", "world"]);
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

@@ -97,8 +97,11 @@
 
   function bodyView(m) {
     const box = el("div", "ws-body");
-    if (m.compressed) {
-      box.append(el("p", "ws-note", "Compressed by a negotiated extension: raw payload shown."));
+    if (m.decode_failed) {
+      box.append(el("p", "ws-note", "Compressed, but it could not be decompressed: the raw payload is shown."));
+    } else if (m.compressed) {
+      const wire = typeof m.wire_size === "number" ? " (" + fmtSize(m.wire_size) + " on the wire)" : "";
+      box.append(el("p", "ws-note", "Decompressed from permessage-deflate" + wire + "."));
     }
     if (m.kind === "close") {
       const code = m.close_code === undefined ? "no code" : "code " + m.close_code;

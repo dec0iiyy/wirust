@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Fields: `host`, `path`, `method`, `status`, `type`, `header`, `body`, `size`, `time`,
-//! `client`, `tls`, `flag`. A bare word or quoted text matches the URL (or the target and
-//! SNI of tunnels and failed handshakes). Text comparisons are ASCII case-insensitive.
+//! `client`, `tls`, `flag`, `ws`. A bare word or quoted text matches the URL (or the target
+//! and SNI of tunnels and failed handshakes). Text comparisons are ASCII case-insensitive.
 //! `docs/interchange.md` lists every field with examples.
 
 use std::fmt;
@@ -20,6 +20,7 @@ use base64::Engine as _;
 
 use crate::events::{Flow, StoredFlow};
 use crate::flow::{BodyRecord, ClientTls, Event, Flag};
+use crate::ws::{Encoding, WsStore};
 
 /// Longest accepted query in bytes; longer ones are refused before parsing.
 pub const MAX_QUERY_LEN: usize = 4096;
@@ -32,7 +33,7 @@ const BODY_SEARCH_LIMIT: usize = 1024 * 1024;
 
 /// Field names, for error messages.
 const FIELDS: &str =
-    "host, path, method, status, type, header, body, size, time, client, tls, flag";
+    "host, path, method, status, type, header, body, size, time, client, tls, flag, ws";
 
 /// A parsed query, compiled to a predicate over stored flows. The empty query matches all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +137,8 @@ enum Term {
     Client(String),
     Tls(TlsState),
     Flag(String),
+    /// WebSocket message content; empty: the flow has messages.
+    Ws(String),
     Text(String),
 }
 
@@ -188,7 +191,14 @@ impl Query {
     /// Whether a stored flow (pending or finished) matches.
     #[must_use]
     pub fn matches(&self, flow: &StoredFlow) -> bool {
-        let facts = match flow {
+        self.matches_with_ws(flow, None)
+    }
+
+    /// Whether a stored flow matches, with `ws` holding the WebSocket messages `ws:`
+    /// searches.
+    #[must_use]
+    pub fn matches_with_ws(&self, flow: &StoredFlow, ws: Option<&WsStore>) -> bool {
+        let mut facts = match flow {
             StoredFlow::Pending(s) => Facts {
                 url: &s.url,
                 method: &s.method,
@@ -198,13 +208,22 @@ impl Query {
             },
             StoredFlow::Done(flow) => Facts::of(flow),
         };
+        facts.ws = ws;
         self.root.eval(&facts)
     }
 
     /// Whether a finished flow matches.
     #[must_use]
     pub fn matches_flow(&self, flow: &Flow) -> bool {
-        self.root.eval(&Facts::of(flow))
+        self.matches_flow_with_ws(flow, None)
+    }
+
+    /// Whether a finished flow matches, with `ws` holding its WebSocket messages.
+    #[must_use]
+    pub fn matches_flow_with_ws(&self, flow: &Flow, ws: Option<&WsStore>) -> bool {
+        let mut facts = Facts::of(flow);
+        facts.ws = ws;
+        self.root.eval(&facts)
     }
 }
 
@@ -287,7 +306,7 @@ fn lex(src: &str) -> Result<Vec<Token>, ParseQueryError> {
                                 let (value, end) = quoted(src, i)?;
                                 i = end;
                                 value
-                            } else if rest.is_empty() {
+                            } else if rest.is_empty() && !key.eq_ignore_ascii_case("ws") {
                                 return fail(i, format!("expected a value after `{key}:`"));
                             } else {
                                 rest.to_owned()
@@ -417,7 +436,7 @@ fn term(key: Option<&str>, value: &str, pos: usize) -> Result<Term, ParseQueryEr
     let Some(key) = key else {
         return Ok(Term::Text(lower));
     };
-    if value.is_empty() {
+    if value.is_empty() && key != "ws" {
         return fail(pos, format!("expected a value after `{key}:`"));
     }
     Ok(match key {
@@ -460,6 +479,7 @@ fn term(key: Option<&str>, value: &str, pos: usize) -> Result<Term, ParseQueryEr
             _ => TlsState::Version(lower.replace('.', "_")),
         }),
         "flag" => Term::Flag(lower),
+        "ws" => Term::Ws(lower),
         other => {
             return fail(
                 pos,
@@ -525,6 +545,11 @@ struct Facts<'f> {
     flags: &'f [Flag],
     /// Tunnel target, or the target and SNI of a failed handshake.
     targets: [Option<&'f str>; 2],
+    id: u64,
+    /// Messages counted on the record (`ws_messages`).
+    ws_messages: Option<u64>,
+    /// Where the WebSocket messages are held, when the caller has them.
+    ws: Option<&'f WsStore>,
 }
 
 impl<'f> Facts<'f> {
@@ -542,6 +567,8 @@ impl<'f> Facts<'f> {
                 tls: x.tls.as_ref(),
                 known_client: x.tls.as_ref().and_then(|t| t.client.as_deref()),
                 flags: &x.flags,
+                id: x.id,
+                ws_messages: x.ws_messages,
                 ..Facts::default()
             },
             Event::TlsFailure(t) => Facts {
@@ -656,6 +683,7 @@ impl Term {
                     .is_some_and(|v| contains(v, want)),
             },
             Self::Flag(want) => facts.flags.iter().any(|f| f.to_string() == *want),
+            Self::Ws(want) => ws_contains(facts, want),
             Self::Text(want) => {
                 contains(facts.url, want)
                     || facts.targets.iter().flatten().any(|t| contains(t, want))
@@ -674,6 +702,21 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
         || hay
             .windows(needle.len())
             .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// `ws:`: whether the flow has messages (empty `needle`) or one whose kept payload
+/// contains `needle`; base64 payloads are decoded first.
+fn ws_contains(facts: &Facts<'_>, needle: &str) -> bool {
+    let Some(ws) = facts.ws else {
+        return needle.is_empty() && facts.ws_messages.is_some_and(|n| n > 0);
+    };
+    ws.any(facts.id, |m| {
+        needle.is_empty()
+            || match m.encoding {
+                Encoding::Utf8 => contains(&m.data, needle),
+                Encoding::Base64 => contains_bytes(&m.bytes(), needle.as_bytes()),
+            }
+    })
 }
 
 fn body_contains(body: &BodyRecord, needle: &str) -> bool {
@@ -785,6 +828,50 @@ pub(crate) mod tests {
 
     fn stored(x: Exchange) -> StoredFlow {
         StoredFlow::Done(Arc::new(Flow::new(Event::Exchange(Box::new(x)))))
+    }
+
+    #[test]
+    fn ws_searches_message_content() {
+        use crate::ws::{Direction, Kind, Parsed, message};
+        let mut socket = exchange(1, "GET", "https://a.test/socket", 101);
+        socket.ws_messages = Some(2);
+        let socket = stored(socket);
+        let plain = stored(exchange(2, "GET", "https://a.test/x", 200));
+        let ws = WsStore::new(10);
+        for (seq, kind, kept) in [
+            (0, Kind::Text, b"{\"op\":\"Subscribe\"}".to_vec()),
+            (1, Kind::Binary, vec![0, 0xff, b'B', b'I', b'N']),
+        ] {
+            let parsed = Parsed {
+                kind,
+                size: kept.len() as u64,
+                kept,
+                compression: None,
+            };
+            ws.push(Arc::new(message(
+                1,
+                seq,
+                Direction::ServerToClient,
+                &parsed,
+            )));
+        }
+        let hits = |q: &str| {
+            let query = Query::parse(q).expect("parses");
+            [&socket, &plain]
+                .iter()
+                .filter(|f| query.matches_with_ws(f, Some(&ws)))
+                .count()
+        };
+        assert_eq!(hits("ws:subscribe"), 1);
+        assert_eq!(hits("ws:bin"), 1, "binary payloads are decoded");
+        assert_eq!(hits("ws:nothing-like-this"), 0);
+        assert_eq!(hits("ws:"), 1);
+        assert_eq!(hits("-ws:"), 1);
+        assert_eq!(hits("ws: host:a.test"), 1);
+        // Without the messages, `ws:` falls back to the count on the record.
+        let query = Query::parse("ws:").expect("parses");
+        assert!(query.matches(&socket) && !query.matches(&plain));
+        assert!(Query::parse("host:").is_err());
     }
 
     fn sample() -> Vec<StoredFlow> {

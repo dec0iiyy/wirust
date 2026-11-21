@@ -119,7 +119,7 @@ mod tests {
                 kind: Kind::Text,
                 kept: format!("m{seq}").into_bytes(),
                 size: 2,
-                compressed: false,
+                compression: None,
             };
             let m = message(1, seq, Direction::ServerToClient, &parsed);
             store.apply(&FlowEvent::WsMessage(Arc::new(m)));

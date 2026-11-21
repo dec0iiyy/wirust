@@ -687,7 +687,7 @@ where
     let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut request));
     let (mut parts, incoming) = request.into_parts();
     let websocket = upgrade && ws::is_websocket(&parts.headers);
-    if websocket && ws::strip_extensions(&mut parts.headers) {
+    if websocket && state.ws.strip_compression && ws::strip_extensions(&mut parts.headers) {
         record.flags.push(Flag::WsExtensionsStripped);
     }
     let request_capture: SharedCapture = Arc::new(Mutex::new(Capture::new(state.body_limit)));
@@ -749,7 +749,7 @@ where
         set_response_head(&mut record, response.status(), response.headers());
         let capture = websocket.then(|| {
             let extensions = ws::negotiated(response.headers());
-            if extensions == ws::Extensions::Negotiated {
+            if extensions != ws::Extensions::None {
                 record.flags.push(Flag::WsCompressed);
             }
             record.ws_messages = Some(0);

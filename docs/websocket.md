@@ -27,8 +27,10 @@ Each message is a `WsMessage`:
 ```
 
 `seq` counts both directions of one connection from 0, in the order the messages completed.
-`close_code`/`close_reason` appear on close frames that carry them; `compressed: true`
-appears when the server negotiated an extension (see below).
+`close_code`/`close_reason` appear on close frames that carry them. A message that was
+compressed on the wire adds `compressed: true` and `wire_size` (its payload bytes on the
+wire); `data` and `size` are then the decompressed payload, or, with `decode_failed: true`,
+the raw wire payload in base64 (see below).
 
 The upgrade's flow record gets `ws_messages` (omitted for other flows). The record is
 published at the `101`, so the event and the JSON log show `ws_messages: 0`; the in-memory
@@ -47,7 +49,10 @@ The parser reads hostile input for as long as a connection lives, so everything 
 | Control frame payload | 125 bytes, FIN set | - | protocol violation otherwise |
 | 64-bit length | top bit clear | - | protocol violation otherwise |
 
-Protocol violations (reserved bits without a negotiated extension, unknown opcodes, a
+| Decompressed bytes per message | the body limit, and 1000 per wire byte (at least 64 KiB) | `--ws-body-limit` | over the ratio: `decode_failed`, raw bytes kept |
+
+Protocol violations (reserved bits without a negotiated extension, RSV2 or RSV3 with
+`permessage-deflate`, unknown opcodes, a
 fragmented or oversized control frame, a length with the top bit set, a client frame
 without a mask or a server frame with one, a continuation without a message, a new data
 frame inside a fragmented message, too many fragments) stop parsing for that direction
@@ -58,19 +63,37 @@ A flow's messages are dropped together with the flow when the flow store evicts 
 (`--max-flows`). `--ws-log` prints one short line per message on the console, such as
 `ws #12 -> text 5 B`; without it the console prints nothing for messages.
 
-## Extensions: stripped from the offer
+## Compression: `permessage-deflate` (RFC 7692)
 
-`permessage-deflate` compresses payloads (RSV1 set), which a recorder would have to inflate
-with the connection's shared window. The proxy instead removes `Sec-WebSocket-Extensions`
-from the client's upgrade request, so the server never negotiates compression or any other
-extension, and marks the flow `ws_extensions_stripped`. The record still shows the client's
-original headers.
+The client's `Sec-WebSocket-Extensions` offer goes to the server unchanged, and every byte
+of the connection is forwarded unchanged; only the recorded copy is decompressed. When the
+server's `101` answers with `permessage-deflate` (alone), the flow is marked `ws_compressed`
+and the parser reads the parameters of that answer: `client_no_context_takeover`,
+`server_no_context_takeover`, `client_max_window_bits`, `server_max_window_bits`.
 
-Trade-off: the client sees no difference (extensions are optional; it gets plain frames it
-already understands), the server sends uncompressed frames, so traffic is somewhat larger. A
-server that requires an extension may refuse the upgrade. If a server answers with
-`Sec-WebSocket-Extensions` anyway, the flow is marked `ws_compressed`, RSV bits are allowed,
-and messages are recorded as raw base64 payloads with `compressed: true`.
+- Each direction keeps one raw-deflate state. With context takeover (the default) the window
+  carries over from one message to the next; with `*_no_context_takeover` for that sender it
+  is reset after each message. A 32 KiB window reads streams made with any smaller
+  `*_max_window_bits`.
+- RSV1 on a text or binary message's first frame marks it compressed; RSV1 on continuation
+  frames is ignored, control frames are never decompressed. Fragments are inflated as they
+  arrive, and the `00 00 ff ff` tail is appended at the end of the message as section 7.2.2
+  says. Messages without RSV1 are recorded as they are.
+- Decompressed output is kept up to `--ws-body-limit` per message (the rest is counted in
+  `size`, `truncated: true`) and stops at 1000 bytes per wire byte (at least 64 KiB): a
+  bomb, like invalid data, marks the message `decode_failed` and keeps the wire bytes.
+  With context takeover, the window is then lost, so later messages of that direction are
+  `decode_failed` too; without it the next message decodes again. Nothing panics on
+  malformed data, and forwarding is never affected.
+- Any other answer (another extension, several extensions, or `permessage-deflate` with an
+  unknown or invalid parameter) also marks the flow `ws_compressed`; RSV bits are then
+  allowed and messages with an RSV bit are recorded raw with `decode_failed: true`.
+
+`--ws-strip-compression` restores the old behaviour for peers whose compression misbehaves:
+the proxy removes `Sec-WebSocket-Extensions` from the client's upgrade request, so the server
+never negotiates an extension, and marks the flow `ws_extensions_stripped`. The record still
+shows the client's original headers. A server that requires an extension may then refuse the
+upgrade.
 
 ## API and events
 
@@ -81,7 +104,9 @@ and messages are recorded as raw base64 payloads with `compressed: true`.
 - The SSE stream `GET /api/v1/events` carries `{"event": "ws", "flow": {...WsMessage...}}`.
   Consumers that only want flows ignore it: `FlowEvent::flow()` returns `None` for it, so
   the log printer and the session writer skip it.
-- The search language (`q=`) has no `ws` field yet.
+- The search language (`q=`, `--filter`, the UI search) has a `ws:` field: `ws:text`
+  matches flows with a held message whose kept payload contains the text (base64 payloads
+  are decoded first, ASCII case is ignored); `ws:` alone matches flows that have messages.
 
 ## HAR
 
@@ -89,16 +114,25 @@ and messages are recorded as raw base64 payloads with `compressed: true`.
 Chrome DevTools writes: `{"type": "send" | "receive", "time": <seconds since the epoch,
 float>, "opcode": 1 | 2 | 8 | 9 | 10, "data": "..."}`. Text is written as is, everything else
 as base64. Import reads the list back best effort: the imported record gets `ws_messages`
-set to its length (`har::HarWsMessage::to_message` converts entries). Session files
-(`--session`) hold flow records only, not messages; `export --har` from a session therefore
-has no `_webSocketMessages`.
+set to its length, and `import --har` writes the messages to the session file
+(`har::HarWsMessage::to_message` converts entries).
+
+## Session files
+
+`--session FILE` appends each message as a line of its own after its flow's record:
+`{"schema_version": 1, "type": "ws_message", ...WsMessage fields}` (`session::WsRecord`).
+`view` prints each WebSocket flow followed by its messages as `--ws-log` prints them,
+`export --har` writes them as `_webSocketMessages`, and `--filter 'ws:...'` searches them.
+Files without message lines load as before. wirust 0.2 and older stop at a message line
+("not a flow record").
 
 ## UI
 
 `ui/ws.js` adds a "Messages" tab for flows with `ws_messages` or one of the WebSocket flags:
 history from the API, live rows from its own SSE stream, direction arrows with a text label,
 time offset from the first message, size and kind, JSON pretty-printed, binary as a hex dump,
-close frames with code and reason, a text filter, a direction toggle and truncation notices.
+close frames with code and reason, a text filter, a direction toggle, truncation notices and
+a note on decompressed (or undecodable) compressed messages.
 It registers through `window.registerTab({id, title, visible, render(flow, container)})` when
 app.js provides it, and otherwise adds its own tab button.
 
@@ -106,7 +140,7 @@ app.js provides it, and otherwise adds its own tab button.
 
 - WebSocket over HTTP/2 (RFC 8441 extended CONNECT) and HTTP/3 WebTransport.
 - gRPC streams, Socket.IO or other application framing beyond raw messages.
-- Decompressing `permessage-deflate` (it is stripped instead, see above).
+- Other compression extensions (`x-webkit-deflate-frame` and the like): recorded raw.
 - Sending, replaying or editing messages, and breakpoints on messages.
 - A bus subscriber that falls more than 4096 events behind skips events: during a flood the
   store or the UI may miss messages (the SSE stream says `: lagged`).

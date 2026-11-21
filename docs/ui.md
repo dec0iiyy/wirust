@@ -26,7 +26,7 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   as are the simple tokens `host:api`, `method:post`, `status:404` / `status:4xx` /
   `status:error` / `status:pending` and `type:json|html|...` when nothing else is typed.
   Any other field of the query language (`path:`, `body:`, `header:`, `size:`, `time:`,
-  `client:`, `tls:`, `flag:`), parentheses, `OR` or a leading `-` sends the whole text to
+  `client:`, `tls:`, `flag:`, `ws:`), parentheses, `OR` or a leading `-` sends the whole text to
   `GET /api/v1/flows?q=` after 250 ms; the list then shows the server's matches and asks
   again (at most once a second) while new flows arrive. A `400` shows the server's message
   with its position under the box and keeps the last good list. The `?` button lists the

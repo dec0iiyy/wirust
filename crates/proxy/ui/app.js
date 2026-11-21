@@ -496,7 +496,7 @@ function move(delta) {
 // Plain words and the four simple tokens filter in the page; anything else in the query
 // language goes to the server (debounced), which answers with the matching ids.
 
-const FIELD_TOKEN = /(^|[\s(])-?(host|status|body|header|size|time|client|tls|flag|path|method|type):/i;
+const FIELD_TOKEN = /(^|[\s(])-?(host|status|body|header|size|time|client|tls|flag|path|method|type|ws):/i;
 
 function needsServer(text) {
   return FIELD_TOKEN.test(text) || /[()]/.test(text) || /(^|\s)OR(\s|$)/.test(text) || /(^|\s)-\S/.test(text);

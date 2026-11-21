@@ -184,6 +184,7 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 | `--session FILE` | | append every finished flow as JSON Lines |
 | `--ws-body-limit BYTES`, `--ws-max-messages N` | `1048576`, `1000` | WebSocket bytes kept per message, messages per connection |
 | `--ws-log` | | print one line per WebSocket message |
+| `--ws-strip-compression` | | remove the client's WebSocket extension offer (by default `permessage-deflate` is decompressed for the record) |
 | `--config-dir DIR` | platform config dir | where the CA is kept |
 | `--allow-remote` | | allow a non-loopback `--listen` address (dangerous) |
 | `--upstream-insecure` | | do not verify server certificates (dangerous) |

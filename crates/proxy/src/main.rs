@@ -174,6 +174,7 @@ Usage:
          [--block-host HOST]... [--rules FILE] [--session FILE]
          [--passthrough PATTERN]... [--decrypt-only PATTERN]...
          [--ws-body-limit BYTES] [--ws-max-messages N] [--ws-log]
+         [--ws-strip-compression]
          [--android-cleanup [--serial S]]
   {NAME} connect [--port P] [--lan-ip IP] [--allow-client IP|CIDR]... [run options]
   {NAME} android setup|reset [--serial S] [--port P] [--config-dir DIR]
@@ -247,6 +248,8 @@ Options:
   --ws-body-limit BYTES WebSocket bytes kept per message (default {ws_body})
   --ws-max-messages N   WebSocket messages kept per connection (default {ws_max})
   --ws-log              print one line per WebSocket message (see docs/websocket.md)
+  --ws-strip-compression  remove the client's WebSocket extension offer, so peers whose
+                        permessage-deflate misbehaves send plain frames
 
 Requests to http://{MAGIC_HOST}/ through the proxy get a page with the CA download.
 ",
@@ -644,6 +647,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                     .context("--ws-max-messages takes a count")?;
             }
             "--ws-log" => run.ws_log = WsLog::Lines,
+            "--ws-strip-compression" => run.ws.strip_compression = true,
             "--system-proxy" => run.system_proxy = SystemProxyFlag::On,
             "--yes" => run.confirm = Confirm::Assumed,
             flag if flag.starts_with('-') => bail!("unknown option {flag}; see --help"),
