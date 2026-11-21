@@ -98,6 +98,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         "text/css; charset=utf-8",
         include_bytes!("../ui/replay.css"),
     ),
+    (
+        "/script.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../ui/script.js"),
+    ),
 ];
 
 type ControlBody = UnsyncBoxBody<Bytes, Infallible>;
@@ -127,6 +132,8 @@ struct State {
     session_file: std::sync::OnceLock<PathBuf>,
     /// Replay, compose and the passthrough lists (`replay_api.rs`).
     replay: crate::replay_api::Handles,
+    /// The `--script` files `/api/v1/script` reports, once [`ControlPlane::set_scripts`] ran.
+    scripts: std::sync::OnceLock<crate::script::Scripts>,
 }
 
 impl std::fmt::Debug for State {
@@ -171,6 +178,7 @@ impl ControlPlane {
             ca_fingerprint: sha256_fingerprint(&proxy.ca().cert_der()?),
             session_file: std::sync::OnceLock::new(),
             replay: crate::replay_api::Handles::new(proxy),
+            scripts: std::sync::OnceLock::new(),
         };
         Ok(Self {
             listener,
@@ -181,6 +189,12 @@ impl ControlPlane {
     /// Serves `rules` at `/api/v1/rules` (see `docs/rules.md`). Only the first call counts.
     pub fn set_rules(&self, rules: Rules) {
         let _ = self.state.rules.set(rules);
+    }
+
+    /// Reports `scripts` at `/api/v1/script` (see `docs/scripting.md`). Only the first call
+    /// counts.
+    pub fn set_scripts(&self, scripts: crate::script::Scripts) {
+        let _ = self.state.scripts.set(scripts);
     }
 
     /// Names the `--session` file, if any, in `/api/v1/info`. Only the first file counts.
@@ -316,6 +330,11 @@ fn module_routes(
         segments,
         request.body(),
     ) {
+        return Some(json(status, &body));
+    }
+    if let Some((status, body)) =
+        crate::script_api::route(state.scripts.get(), method, segments, query)
+    {
         return Some(json(status, &body));
     }
     crate::replay_api::route(

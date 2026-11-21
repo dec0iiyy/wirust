@@ -22,7 +22,11 @@ unmaintained = "all"
 # Add an entry here, with a reason and an expiry, only for an advisory that was reviewed and
 # does not reach our code:
 #   ignore = [{ id = "RUSTSEC-0000-0000", reason = "...", expiry = "2027-01-31" }]
-ignore = []
+ignore = [
+    # smartstring is a required dependency of rhai (`--script`); the notice is "unmaintained"
+    # (the repository was archived), not a vulnerability. Revisit when rhai drops it.
+    { id = "RUSTSEC-2026-0249", reason = "unmaintained notice only; rhai requires smartstring", expiry = "2027-05-31" },
+]
 
 [licenses]
 # Permissive licences, plus the two weak or data licences the graph needs (listed as
@@ -50,6 +54,17 @@ allow = ["GPL-3.0-only"]
 [[licenses.exceptions]]
 crate = "option-ext"
 allow = ["MPL-2.0"]
+
+# `smartstring` (via `rhai`) is MPL-2.0 or later: file-level copyleft, unmodified use is fine.
+[[licenses.exceptions]]
+crate = "smartstring"
+allow = ["MPL-2.0"]
+
+# `tiny-keccak` (via `rhai` > `ahash` > `const-random-macro`) is CC0-1.0, a public-domain
+# dedication; it runs only at compile time inside a proc macro.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
 
 # `webpki-roots` ships the Mozilla root list under a permissive data licence.
 [[licenses.exceptions]]

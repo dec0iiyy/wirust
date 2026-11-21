@@ -51,6 +51,15 @@ pub struct RequestCtx {
     pub extensions: http::Extensions,
 }
 
+/// The TLS client of an HTTPS request, in [`RequestCtx::extensions`] (absent for plain HTTP).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+    /// The client's JA4 fingerprint.
+    pub ja4: String,
+    /// The known client this fingerprint matches, if any.
+    pub known_client: Option<String>,
+}
+
 /// The response as interceptors see and change it.
 #[derive(Debug, Clone)]
 pub struct ResponseCtx {

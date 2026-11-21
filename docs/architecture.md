@@ -27,6 +27,7 @@ built in parallel without editing the same functions.
 | `sysproxy.rs`, `trust.rs`, `oscmd.rs` | `system-proxy` and `--system-proxy` with the saved-state file; `ca install`/`uninstall`/`status`; the `CommandRunner` trait both run OS tools through |
 | `qr.rs`, `mobileconfig.rs`, `adb.rs` | terminal QR code; iOS profile with the CA; `adb` argument builders for `android setup`/`reset` |
 | `rules.rs`, `rules_api.rs` | the rules engine (`--rules`, three chain stages) and its API routes; `docs/rules.md` |
+| `script.rs`, `script_api.rs` | sandboxed Rhai scripts (`--script`, one chain stage per file, before the rule breakpoints) and `/api/v1/script`; `docs/scripting.md` |
 | `replay.rs`, `replay_api.rs` | replay and compose (`Replayer`, limits, `ReplayTag` read by `forward`), the `replay` CLI, routes for replay, compose and passthrough; `docs/replay.md` |
 | `passthrough.rs` | `--passthrough`/`--decrypt-only` patterns, the live `Passthrough` lists, the undecrypted relay; `docs/passthrough.md` |
 | `throttle.rs` | `Throttled`, the bandwidth-capped streaming body |

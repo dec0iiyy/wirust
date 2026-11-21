@@ -76,7 +76,9 @@ def license_files(package):
         path = os.path.join(root, name)
         if os.path.isfile(path) and LICENSE_FILE.match(name):
             with open(path, "rb") as f:
-                files.append((name, f.read().decode("utf-8", errors="replace").strip("\n")))
+                # CRLF texts are normalised: `--check` reads the file back in text mode.
+                text = f.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+                files.append((name, text.strip("\n")))
     return files
 
 

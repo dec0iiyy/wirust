@@ -2,8 +2,7 @@
 
 Not built yet, in rough priority order. Everything else described in `docs/` is built.
 
-1. Scripting: rules are declarative TOML, with no user code.
-2. HTTP/3 interception: QUIC is UDP and cannot go through an HTTP CONNECT tunnel, so clients
+1. HTTP/3 interception: QUIC is UDP and cannot go through an HTTP CONNECT tunnel, so clients
    fall back to h2 or HTTP/1.1. It needs a transparent mode (a WireGuard-style entry point)
    or MASQUE (`CONNECT-UDP`). The same mode would catch apps that ignore the system proxy.
 3. Testing on real phones and on iOS: `docs/mobile.md` was tried only on the Android emulator.

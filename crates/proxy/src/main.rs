@@ -20,6 +20,7 @@ use wirust::oscmd::{Platform, SystemRunner};
 use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
 use wirust::rules::Rules;
+use wirust::script::Scripts;
 use wirust::session;
 use wirust::sysproxy::{self, Enabled, SystemProxy};
 use wirust::trust::{self, CaTrust, TrustStatus};
@@ -87,6 +88,7 @@ struct RunArgs {
     filter: Option<String>,
     har: Option<PathBuf>,
     rules: Option<PathBuf>,
+    scripts: Vec<PathBuf>,
     passthrough: Vec<String>,
     decrypt_only: Vec<String>,
     replay: ReplayArgs,
@@ -171,7 +173,7 @@ Usage:
          [--upstream-proxy URL] [--upstream-bypass LIST] [--system-proxy]
          [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
-         [--block-host HOST]... [--rules FILE] [--session FILE]
+         [--block-host HOST]... [--rules FILE] [--script FILE]... [--session FILE]
          [--passthrough PATTERN]... [--decrypt-only PATTERN]...
          [--ws-body-limit BYTES] [--ws-max-messages N] [--ws-log]
          [--android-cleanup [--serial S]]
@@ -236,6 +238,8 @@ Options:
   --har FILE            HAR file to write (export) or read (import)
   --rules FILE          TOML rules (block, map-local, map-remote, rewrite, throttle, breakpoints);
                         reloaded when it changes; see docs/rules.md
+  --script FILE         sandboxed Rhai script with on_request/on_response hooks (repeatable);
+                        reloaded when it changes; see docs/scripting.md
   --passthrough PATTERN relay this host's TLS undecrypted, such as '*.bank.example' or
                         'api.example.com:443' (repeatable); see docs/passthrough.md
   --decrypt-only PATTERN  decrypt only matching hosts and relay all others (repeatable)
@@ -530,6 +534,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         filter: None,
         har: None,
         rules: None,
+        scripts: Vec::new(),
         passthrough: Vec::new(),
         decrypt_only: Vec::new(),
         replay: ReplayArgs::default(),
@@ -609,6 +614,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             "--filter" => run.filter = Some(value(arg)?),
             "--har" => run.har = Some(PathBuf::from(value(arg)?)),
             "--rules" => run.rules = Some(PathBuf::from(value(arg)?)),
+            "--script" => run.scripts.push(PathBuf::from(value(arg)?)),
             "--passthrough" => run.passthrough.push(value(arg)?),
             "--decrypt-only" => run.decrypt_only.push(value(arg)?),
             "--id" => run.replay.id = Some(value(arg)?.parse().context("--id takes a flow id")?),
@@ -1006,13 +1012,15 @@ fn passthrough(args: &RunArgs) -> anyhow::Result<Passthrough> {
 }
 
 /// Puts the built-in interceptors (`--block-host`, `--add-header`, `--remove-header`) and then
-/// the rules engine on the chain. With `--ui` the rules engine is on, empty, even without
-/// `--rules`, so the API can manage it. Returns the engine when it is on.
+/// the rules engine on the chain, with the `--script` stages after the rule actions and before
+/// the rule breakpoints. With `--ui` the rules engine is on, empty, even without `--rules`, so
+/// the API can manage it. Returns the engine when it is on.
 fn register_interceptors(
     config: &mut Config,
     block_hosts: Vec<String>,
     (add_headers, remove_headers): (Vec<(HeaderName, HeaderValue)>, Vec<HeaderName>),
     (rules_file, ui): (Option<&std::path::Path>, bool),
+    scripts: Option<&Scripts>,
 ) -> anyhow::Result<Option<Rules>> {
     if !block_hosts.is_empty() {
         config
@@ -1029,10 +1037,13 @@ fn register_interceptors(
         (None, true) => Some(Rules::new()),
         (None, false) => None,
     };
-    if let Some(rules) = &rules {
-        for stage in rules.interceptors(&config.pauses) {
-            config.interceptors.push(stage);
-        }
+    let mut stages = (rules.as_ref()).map_or_else(Vec::new, |r| r.interceptors(&config.pauses));
+    // The last rules stage holds the breakpoints: they see what the scripts made.
+    let breakpoints = stages.pop();
+    stages.extend(scripts.map_or_else(Vec::new, Scripts::interceptors));
+    stages.extend(breakpoints);
+    for stage in stages {
+        config.interceptors.push(stage);
     }
     Ok(rules)
 }
@@ -1066,6 +1077,7 @@ fn run(
         ..Config::new(config_dir(args.config_dir.clone())?)
     };
     let dir = config_dir(args.config_dir.clone())?;
+    let scripts = load_scripts(&args)?;
     let rules = register_interceptors(
         &mut config,
         std::mem::take(&mut args.block_hosts),
@@ -1074,6 +1086,7 @@ fn run(
             std::mem::take(&mut args.remove_headers),
         ),
         (args.rules.as_deref(), args.ui.is_some()),
+        scripts.as_ref(),
     )?;
     warn_about_risky_options(
         config.listen,
@@ -1121,6 +1134,7 @@ fn run(
         if let Some(rules) = &rules {
             start_rules(rules, control.as_ref(), args.rules.is_some());
         }
+        start_scripts(scripts.as_ref(), control.as_ref());
         let printer = tokio::spawn(print_flows(proxy.subscribe(), args.json, args.ws_log));
         let control = control.map(|control| tokio::spawn(control.run()));
         let result = tokio::select! {
@@ -1195,6 +1209,27 @@ fn start_session(
 
 /// Hands the rules to the control plane's API and, when they came from a file, starts watching
 /// that file for changes.
+/// Loads the `--script` files; `None` without any.
+fn load_scripts(args: &RunArgs) -> anyhow::Result<Option<Scripts>> {
+    if args.scripts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        Scripts::load(&args.scripts, args.body_limit).context("--script")?,
+    ))
+}
+
+/// Shows the scripts in the API and reloads them when their files change.
+fn start_scripts(scripts: Option<&Scripts>, control: Option<&ControlPlane>) {
+    let Some(scripts) = scripts else {
+        return;
+    };
+    if let Some(control) = control {
+        control.set_scripts(scripts.clone());
+    }
+    drop(scripts.watch(Duration::from_secs(1)));
+}
+
 fn start_rules(rules: &Rules, control: Option<&ControlPlane>, watch_file: bool) {
     if let Some(control) = control {
         control.set_rules(rules.clone());

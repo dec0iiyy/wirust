@@ -119,6 +119,7 @@ profile. Limits, from the platforms' documentation:
 | Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL; [docs/ui.md](docs/ui.md) |
 | Search | `host:` `method:` `status:5xx` `type:json` and more, in the UI, `view` and `export`; [docs/interchange.md](docs/interchange.md) |
 | Rules | block, status, map local, map remote, header and body rewrite (regex, JSON path), delay, throttle; TOML file reloaded on change, editable in the UI; [docs/rules.md](docs/rules.md) |
+| Scripting | sandboxed [Rhai](https://rhai.rs) scripts with `on_request` / `on_response` hooks (`--script`): headers, decoded bodies, mock answers, block, delay, flow flags; reloaded on change; [docs/scripting.md](docs/scripting.md) |
 | Breakpoints | pause matching requests or responses in the UI; see and edit method, URL, status, headers and text body, then resume or abort |
 | Replay and compose | send a captured request again, changed or not (UI, CLI, API), or compose a new one (UI, API); [docs/replay.md](docs/replay.md) |
 | Sessions and HAR | append flows to a JSON Lines session file; export HAR 1.2 from the UI or CLI, import HAR from browser dev tools |
@@ -140,13 +141,13 @@ official pages do not say.
 | Rules, map local and remote | yes | yes (paid tiers) | yes | yes |
 | Breakpoints | yes | yes (paid tiers) | yes | yes |
 | WebSocket | yes (HTTP/1.1) | yes | yes | yes |
-| Scripting | no | JavaScript | | Python |
+| Scripting | yes (Rhai, sandboxed) | JavaScript | | Python |
 | gRPC, protobuf views | yes (schema-less) | protobuf | protobuf | yes |
 | HTTP/3 | no | | | yes |
 | Sets the system proxy | yes (macOS; Windows and GNOME written but untested) | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
 | Client JA4, JA3 | yes | | | |
 
-Not in wirust yet: a native app, scripting, `.proto`-aware gRPC views, HTTP/3. See
+Not in wirust yet: a native app, `.proto`-aware gRPC views, HTTP/3. See
 [docs/roadmap.md](docs/roadmap.md).
 
 ## Security
