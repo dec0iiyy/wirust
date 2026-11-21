@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+
+PackageIdentifier: dec0iiyy.wirust
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: dec0iiyy
+PublisherUrl: https://github.com/dec0iiyy
+PublisherSupportUrl: https://github.com/dec0iiyy/wirust/issues
+PackageName: wirust
+PackageUrl: https://github.com/dec0iiyy/wirust
+License: GPL-3.0-only
+LicenseUrl: https://github.com/dec0iiyy/wirust/blob/main/LICENSE
+ShortDescription: Single-binary HTTPS debugging proxy with a web UI that shows the TLS fingerprint of every client.
+Description: |-
+  wirust sits between an app and its servers and shows every request and response. It decrypts
+  HTTPS with a certificate authority it creates on your machine, and has a web UI with search,
+  rules (block, mock, map, rewrite, throttle), breakpoints, replay, HAR import and export and
+  WebSocket messages. For each client it also shows the JA4 and JA3 fingerprint of its TLS
+  handshake and the known client it matches. Free software, one binary, no account, no telemetry.
+Moniker: wirust
+Tags:
+- debugging
+- http
+- https
+- ja3
+- ja4
+- mitm
+- proxy
+- tls
+ReleaseNotesUrl: https://github.com/dec0iiyy/wirust/releases/tag/v0.1.0
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

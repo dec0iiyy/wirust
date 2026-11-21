@@ -43,6 +43,18 @@ from [Releases](https://github.com/dec0iiyy/wirust/releases): `wirust-linux-x86_
 `wirust-linux-aarch64`, `wirust-macos-arm64`, `wirust-macos-x86_64`,
 `wirust-windows-x86_64.exe`. From source: `cargo build --release` (Rust 1.88+, a C compiler).
 
+Windows (x86_64), with [Scoop](https://scoop.sh):
+
+```powershell
+scoop install https://raw.githubusercontent.com/dec0iiyy/wirust/main/packaging/scoop/wirust.json
+```
+
+winget: the manifest is prepared in [packaging/winget](packaging/winget) but is not yet in the
+winget repository, so `winget install` does not find wirust yet. The Windows binary is not
+code-signed, so SmartScreen may warn on first start: choose "More info", then "Run anyway".
+[docs/install.md](docs/install.md) shows how to check the SHA-256 and the build attestation
+(`gh attestation verify`) first.
+
 **Run.**
 
 ```sh
