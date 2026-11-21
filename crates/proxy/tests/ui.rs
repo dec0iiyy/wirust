@@ -132,6 +132,19 @@ async fn every_ui_file_is_served_with_its_type_and_a_strict_csp() -> TestResult 
     Ok(())
 }
 
+/// A class with `display: flex` beats the browser's `[hidden]` default, which once drew the
+/// empty rules menu as a small circle in the top-left corner of the page.
+#[test]
+fn the_stylesheet_hides_every_element_that_has_the_hidden_attribute() -> TestResult {
+    let css = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/style.css"))?;
+    let compact: String = css.split_whitespace().collect();
+    assert!(
+        compact.contains("[hidden]{display:none!important;}"),
+        "style.css needs a global `[hidden] {{ display: none !important; }}` rule"
+    );
+    Ok(())
+}
+
 #[test]
 fn ui_files_use_no_html_sinks_dynamic_code_or_remote_urls() -> TestResult {
     for (_, content_type, name) in ui_files()? {

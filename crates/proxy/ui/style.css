@@ -51,6 +51,8 @@
 }
 
 * { box-sizing: border-box; }
+/* A `display` rule on a class would otherwise beat the browser's `[hidden]` default. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
