@@ -170,8 +170,11 @@ action = { type = "throttle", bytes_per_second = 10000, latency_ms = 20 }
     let (_, body) = setup.get("/big").await?;
     let elapsed = started.elapsed();
     assert_eq!(body.len(), BIG);
+    // The lower bound proves the cap works. The upper bound only catches a stuck stream: a
+    // Windows CI runner took 2.3 s for this exchange, so a tight limit measures the machine,
+    // not the code. The precise rate is checked without a network in `throttle.rs`.
     assert!(
-        elapsed >= Duration::from_millis(280) && elapsed < Duration::from_millis(900),
+        elapsed >= Duration::from_millis(280) && elapsed < Duration::from_secs(10),
         "took {elapsed:?}"
     );
     Ok(())
