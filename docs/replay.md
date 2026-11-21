@@ -69,7 +69,9 @@ optional additions). Its `client` is the proxy's own listen address.
   definition, and the HTTP/1.1 leg writes the names as stored, which are lowercase.
 - Body: the stored request body. When `--body-limit` cut it (`truncated: true`), or it was
   never kept, the replay is refused with `409` unless the edit supplies `body` or
-  `body_base64`; the proxy never sends a silently shortened body.
+  `body_base64`; the proxy never sends a silently shortened body. A body stored decoded
+  (`content_encoding.decoded`, `docs/interchange.md`) is sent as identity: `content-encoding`
+  is dropped unless the edit sets it again.
 - HTTPS targets offer h2 and HTTP/1.1 to the server.
 
 ## `apply_rules`

@@ -177,6 +177,24 @@ pub struct BodyRecord {
     pub encoding: &'static str,
     /// The kept bytes in that encoding.
     pub data: String,
+    /// What the body's `Content-Encoding` was and whether `data` is decoded; omitted for a
+    /// body sent without one (`docs/interchange.md`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content_encoding: Option<ContentDecoding>,
+}
+
+/// How a body sent with a `Content-Encoding` was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentDecoding {
+    /// The codings in the order the sender applied them, lowercase, without `identity`.
+    pub codings: Vec<String>,
+    /// Bytes on the wire, all of them, also past the body limit.
+    pub wire_size: u64,
+    /// Whether the record holds the decoded body; `false` means the wire bytes.
+    pub decoded: bool,
+    /// Why the body is not decoded, or why the decoded body is cut short.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reason: Option<String>,
 }
 
 /// The serialised form of a [`BodyRecord`]; any encoding but `base64` reads as `utf8`.
@@ -186,6 +204,8 @@ struct BodyRecordWire {
     truncated: bool,
     encoding: String,
     data: String,
+    #[serde(default)]
+    content_encoding: Option<ContentDecoding>,
 }
 
 impl<'de> Deserialize<'de> for BodyRecord {
@@ -200,17 +220,26 @@ impl<'de> Deserialize<'de> for BodyRecord {
                 "utf8"
             },
             data: wire.data,
+            content_encoding: wire.content_encoding,
         })
     }
 }
 
 impl From<&Capture> for BodyRecord {
+    /// The captured bytes as they are, without decoding.
     fn from(capture: &Capture) -> Self {
-        let data = capture.data();
+        Self::from_bytes(capture.data(), capture.size(), capture.truncated())
+    }
+}
+
+impl BodyRecord {
+    /// The record of `data`, the first bytes of a `size`-byte body; text stays text.
+    #[must_use]
+    pub fn from_bytes(data: &[u8], size: u64, truncated: bool) -> Self {
         // A UTF-8 sequence cut by the limit is still text: keep the valid prefix.
         let text = match std::str::from_utf8(data) {
             Ok(text) => Some(text),
-            Err(e) if e.error_len().is_none() && capture.truncated() => {
+            Err(e) if e.error_len().is_none() && truncated => {
                 std::str::from_utf8(&data[..e.valid_up_to()]).ok()
             }
             Err(_) => None,
@@ -223,10 +252,11 @@ impl From<&Capture> for BodyRecord {
             ),
         };
         Self {
-            size: capture.size(),
-            truncated: capture.truncated(),
+            size,
+            truncated,
             encoding,
             data,
+            content_encoding: None,
         }
     }
 }

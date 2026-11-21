@@ -70,6 +70,10 @@ fn plan(x: &Exchange) -> Plan {
         if lower.starts_with(':') || SKIPPED.contains(&lower.as_str()) {
             continue;
         }
+        // The stored body is decoded, so the command sends it as identity.
+        if lower == "content-encoding" && body.is_decoded() {
+            continue;
+        }
         if lower == "accept-encoding" {
             compressed = true;
             continue;
@@ -216,6 +220,7 @@ mod tests {
             truncated: false,
             encoding: "utf8",
             data: NASTY.to_owned(),
+            content_encoding: None,
         };
         let plan = plan(&x);
         let (stdin, args) = run(&plan);
@@ -250,6 +255,7 @@ mod tests {
             truncated: true,
             encoding: "base64",
             data: "/wBh".to_owned(), // ff 00 61
+            content_encoding: None,
         };
         let plan = plan(&x);
         let (stdin, args) = run(&plan);
@@ -270,6 +276,7 @@ mod tests {
             truncated: false,
             encoding: "utf8",
             data: "@/etc/passwd 'x'".to_owned(),
+            content_encoding: None,
         };
         let (stdin, args) = run(&super::plan(&x));
         assert_eq!(stdin, b"@/etc/passwd 'x'");

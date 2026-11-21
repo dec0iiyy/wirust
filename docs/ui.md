@@ -81,8 +81,9 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   - Request / Response: headers with copy buttons, then the body by content type: JSON as
     a collapsible tree with search, form-urlencoded as a table, text as monospace, images
     as a preview, everything else as a hex dump (first 64 KB). Compressed bodies
-    (`Content-Encoding`) are shown as stored, not decoded. A truncated body says how much
-    was kept (`--body-limit`).
+    (`Content-Encoding`) are shown decoded, with a note such as "Decoded from br (wire:
+    334 B)"; one that could not be decoded is shown as stored, with the reason. A truncated
+    body says how much was kept (`--body-limit`).
   - Copy as cURL (POSIX shell quoting; binary bodies go through `base64 --decode`), Copy
     URL, Copy body. There is deliberately no "open body in a new tab": it would run the
     body as active content on this origin.

@@ -811,7 +811,43 @@ impl HeaderEdits {
     }
 }
 
+/// The most decoded bytes a body rule works on; a body that decodes to more passes through
+/// unchanged.
+const RULE_DECODE_LIMIT: usize = 64 << 20;
+
 impl BodyEdits {
+    /// Applies the edits to a body sent with `headers`. A body with a `Content-Encoding` is
+    /// edited decoded: when the edits change it, it goes on as identity and the header is
+    /// removed (the proxy sets `Content-Length`); when they do not, the wire bytes go on.
+    /// `None` when the body cannot be decoded whole, so the rule does not fire.
+    fn apply_coded(&self, body: &Bytes, headers: &mut HeaderMap) -> Option<Bytes> {
+        let listed: Vec<(String, String)> = headers
+            .get_all(http::header::CONTENT_ENCODING)
+            .iter()
+            .map(|v| {
+                (
+                    "content-encoding".to_owned(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let codings = crate::decode::codings(&listed);
+        if codings.is_empty() || body.is_empty() {
+            return Some(self.apply(body));
+        }
+        let decoded = crate::decode::decode(body, &codings, RULE_DECODE_LIMIT, false).ok()?;
+        if decoded.cut.is_some() {
+            return None;
+        }
+        let decoded = Bytes::from(decoded.data);
+        let edited = self.apply(&decoded);
+        if edited == decoded {
+            return Some(body.clone());
+        }
+        headers.remove(http::header::CONTENT_ENCODING);
+        Some(edited)
+    }
+
     fn apply(&self, body: &Bytes) -> Bytes {
         let mut bytes = body.to_vec();
         for (regex, with) in &self.replace {
@@ -1261,10 +1297,14 @@ impl Interceptor for MainStage {
                 }
                 Act::MapRemote(remote) => remote.apply(request),
                 Act::Headers(_, edits) => edits.apply(&mut request.headers),
-                Act::Body(_, edits) => match &request.body {
-                    Some(body) => request.body = Some(edits.apply(body)),
-                    None => continue,
-                },
+                Act::Body(_, edits) => {
+                    match (request.body.as_ref())
+                        .and_then(|body| edits.apply_coded(body, &mut request.headers))
+                    {
+                        Some(body) => request.body = Some(body),
+                        None => continue,
+                    }
+                }
                 _ => continue,
             }
             request.flags.push(flag);
@@ -1280,10 +1320,14 @@ impl Interceptor for MainStage {
             match &rule.action {
                 Act::Status(status) => response.status = *status,
                 Act::Headers(_, edits) => edits.apply(&mut response.headers),
-                Act::Body(_, edits) => match &response.body {
-                    Some(body) => response.body = Some(edits.apply(body)),
-                    None => continue,
-                },
+                Act::Body(_, edits) => {
+                    match (response.body.as_ref())
+                        .and_then(|body| edits.apply_coded(body, &mut response.headers))
+                    {
+                        Some(body) => response.body = Some(body),
+                        None => continue,
+                    }
+                }
                 Act::Throttle(throttle) => response.throttle = Some(*throttle),
                 _ => continue,
             }
@@ -1336,6 +1380,35 @@ impl Interceptor for BreakpointStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_edits_on_an_encoded_body_send_identity() {
+        use std::io::Write as _;
+        let edits = BodyEdits {
+            replace: vec![(bytes_regex("world").expect("valid"), b"there".to_vec())],
+            json_set: Vec::new(),
+        };
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"hello world").expect("write to Vec");
+        let wire = Bytes::from(encoder.finish().expect("finish to Vec"));
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+
+        let out = edits.apply_coded(&wire, &mut headers).expect("decodes");
+        assert_eq!(&out[..], b"hello there");
+        assert!(!headers.contains_key("content-encoding"));
+
+        // No change: the wire bytes and the header stay.
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        let quiet = BodyEdits::default();
+        assert_eq!(quiet.apply_coded(&wire, &mut headers), Some(wire.clone()));
+        assert!(headers.contains_key("content-encoding"));
+
+        // Undecodable: the rule does not fire.
+        let garbage = Bytes::from_static(b"not gzip");
+        assert_eq!(edits.apply_coded(&garbage, &mut headers), None);
+    }
 
     fn set(toml: &str) -> Result<RuleSet, String> {
         let file: RulesFile = toml::from_str(toml).map_err(|e| e.to_string())?;

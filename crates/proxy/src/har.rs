@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::NAME;
 use crate::clock::Utc;
 use crate::events::Flow;
-use crate::flow::{BodyRecord, ClientTls, Event, Exchange, Flag, Timing};
+use crate::flow::{BodyRecord, ClientTls, ContentDecoding, Event, Exchange, Flag, Timing};
 use crate::ws::{Direction, Kind, WsMessage, WsStore};
 
 /// Largest HAR document [`from_har`] accepts, in bytes.
@@ -391,6 +391,9 @@ pub struct Content {
     /// `base64` for binary bodies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// Bytes saved by `Content-Encoding`: decoded size minus wire size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<i64>,
     /// Says when the body was cut by the body limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -535,6 +538,19 @@ fn encoding(body: &BodyRecord) -> Option<String> {
     (body.encoding == "base64").then(|| "base64".to_owned())
 }
 
+/// Bytes on the wire: the encoded size of a decoded body, otherwise its size.
+fn wire_size(body: &BodyRecord) -> i64 {
+    match &body.content_encoding {
+        Some(c) if c.decoded => size(c.wire_size),
+        _ => size(body.size),
+    }
+}
+
+/// Decoded minus wire size of a body decoded whole.
+fn compression(body: &BodyRecord) -> Option<i64> {
+    (body.is_decoded() && !body.truncated).then(|| size(body.size) - wire_size(body))
+}
+
 fn size(bytes: u64) -> i64 {
     i64::try_from(bytes).unwrap_or(i64::MAX)
 }
@@ -558,7 +574,7 @@ fn entry(x: &Exchange) -> Entry {
         query_string: query_string(&x.url),
         post_data,
         headers_size: -1,
-        body_size: size(x.request_body.size),
+        body_size: wire_size(&x.request_body),
         comment: None,
     };
     let content = match &x.response_body {
@@ -569,6 +585,7 @@ fn entry(x: &Exchange) -> Entry {
                 .to_owned(),
             text: Some(body.data.clone()),
             encoding: encoding(body),
+            compression: compression(body),
             comment: truncation_note(body),
         },
         None => Content {
@@ -587,7 +604,7 @@ fn entry(x: &Exchange) -> Entry {
             .unwrap_or_default()
             .to_owned(),
         headers_size: -1,
-        body_size: x.response_body.as_ref().map_or(-1, |b| size(b.size)),
+        body_size: x.response_body.as_ref().map_or(-1, wire_size),
         comment: None,
     };
     let timings = timings(&x.timing);
@@ -819,7 +836,23 @@ fn body(text: String, encoding: Option<&str>, declared: i64) -> BodyRecord {
         truncated: size > kept,
         encoding: if base64 { "base64" } else { "utf8" },
         data: text,
+        content_encoding: None,
     }
+}
+
+/// HAR text is the decoded body (HAR 1.2 `content.text`), so a body whose headers name a
+/// `Content-Encoding` is marked decoded, with `bodySize` as its wire size when given.
+fn mark_decoded(body: &mut BodyRecord, headers: &[(String, String)], body_size: i64) {
+    let codings = crate::decode::codings(headers);
+    if codings.is_empty() || body.data.is_empty() {
+        return;
+    }
+    body.content_encoding = Some(ContentDecoding {
+        codings,
+        wire_size: u64::try_from(body_size).unwrap_or(body.size),
+        decoded: true,
+        reason: None,
+    });
 }
 
 fn known(ms: f64) -> Option<f64> {
@@ -845,17 +878,22 @@ fn exchange(id: u64, entry: Entry) -> Exchange {
     let status = u16::try_from(response.status)
         .ok()
         .filter(|s| (100..=999).contains(s));
-    let request_body = match request.post_data {
+    let request_headers = headers(request.headers);
+    let response_headers = headers(response.headers);
+    let mut request_body = match request.post_data {
         Some(post) => body(post.text, post.encoding.as_deref(), request.body_size),
         None => body(String::new(), None, request.body_size),
     };
+    mark_decoded(&mut request_body, &request_headers, request.body_size);
     let content = response.content;
     let response_body = (status.is_some() || content.text.is_some()).then(|| {
-        body(
+        let mut record = body(
             content.text.unwrap_or_default(),
             content.encoding.as_deref(),
             content.size,
-        )
+        );
+        mark_decoded(&mut record, &response_headers, response.body_size);
+        record
     });
     let ssl = known(t.ssl);
     let connect = known(t.connect).map(|c| (c - ssl.unwrap_or(0.0)).max(0.0));
@@ -885,8 +923,8 @@ fn exchange(id: u64, entry: Entry) -> Exchange {
         upstream_version: status.map(|_| our_version(&response.http_version)),
         status,
         reason: status.map(|_| response.status_text),
-        request_headers: headers(request.headers),
-        response_headers: headers(response.headers),
+        request_headers,
+        response_headers,
         request_body,
         response_body,
         timing: Timing {
@@ -937,6 +975,7 @@ mod tests {
             truncated: true,
             encoding: "base64",
             data: "/wA=".to_owned(),
+            content_encoding: None,
         };
         a.response_headers.push((
             "set-cookie".to_owned(),

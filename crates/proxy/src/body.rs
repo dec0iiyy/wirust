@@ -33,6 +33,12 @@ impl Capture {
         self.data.extend_from_slice(&chunk[..room.min(chunk.len())]);
     }
 
+    /// The most bytes this capture keeps.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
     /// The kept bytes.
     #[must_use]
     pub fn data(&self) -> &[u8] {

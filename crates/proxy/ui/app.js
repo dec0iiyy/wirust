@@ -914,12 +914,21 @@ function bodyView(body, headers) {
     copyButton("Copy body", () => body.data, "mini"),
   ]);
   box.append(bar);
-  if (body.truncated) {
+  const coded = body.content_encoding;
+  const decoded = Boolean(coded && coded.decoded);
+  if (decoded) {
+    box.append(h("p", "hint", "Decoded from " + coded.codings.join(", ") + " (wire: " + fmtSize(coded.wire_size) + ")."));
+  }
+  if (body.truncated && decoded) {
+    box.append(h("p", "notice", "Truncated: showing the first " + fmtSize(kept) + " decoded" +
+      (coded.reason ? " (" + coded.reason + ")." : ".")));
+  } else if (body.truncated) {
     box.append(h("p", "notice", "Truncated: showing the first " + fmtSize(kept) + " of " + fmtSize(body.size) +
       " (raise --body-limit to keep more)."));
   }
-  if (encoding && encoding !== "identity") {
-    box.append(h("p", "notice", "Stored as sent: " + encoding + "-encoded, not decoded."));
+  if (!decoded && encoding && encoding !== "identity") {
+    const why = coded && coded.reason ? ": " + coded.reason : "";
+    box.append(h("p", "notice", "Stored as sent: " + encoding + "-encoded, not decoded" + why + "."));
     box.append(hexDump(bodyBytes(body)));
     return box;
   }

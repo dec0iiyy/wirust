@@ -751,12 +751,14 @@ pub(crate) mod tests {
                 truncated: false,
                 encoding: "utf8",
                 data: String::new(),
+                content_encoding: None,
             },
             response_body: Some(BodyRecord {
                 size: 20_000,
                 truncated: false,
                 encoding: "utf8",
                 data: "{\"greeting\": \"Hello World\"}".to_owned(),
+                content_encoding: None,
             }),
             timing: Timing {
                 connect_ms: Some(10.0),
@@ -797,6 +799,7 @@ pub(crate) mod tests {
             truncated: false,
             encoding: "base64",
             data: base64::engine::general_purpose::STANDARD.encode(b"\xffbinary SECRET"),
+            content_encoding: None,
         });
         b.timing.total_ms = 30.0;
         let c = StoredFlow::Done(Arc::new(Flow::new(Event::TlsFailure(TlsFailure {
