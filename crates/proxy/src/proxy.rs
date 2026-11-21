@@ -43,6 +43,7 @@ use crate::pairing::{Pairing, Verdict};
 use crate::passthrough::{self, Passthrough};
 use crate::replay::ReplayTag;
 use crate::upstream::{self, Connector, Opened, Sender};
+use crate::upstream_proxy::{Bypass, Route, UpstreamProxy};
 use crate::ws::{self, WsLimits};
 
 /// Body type of every request and response the proxy forwards or makes.
@@ -109,6 +110,10 @@ pub struct Config {
     pub passthrough: Passthrough,
     /// WebSocket capture limits (`--ws-body-limit`, `--ws-max-messages`).
     pub ws: WsLimits,
+    /// Another proxy every outbound connection goes through (`--upstream-proxy`).
+    pub upstream_proxy: Option<UpstreamProxy>,
+    /// Destinations that skip `upstream_proxy` (`--upstream-bypass`).
+    pub upstream_bypass: Bypass,
 }
 
 impl Config {
@@ -129,6 +134,8 @@ impl Config {
             pairing: None,
             passthrough: Passthrough::default(),
             ws: WsLimits::default(),
+            upstream_proxy: None,
+            upstream_bypass: Bypass::default(),
         }
     }
 }
@@ -160,7 +167,7 @@ pub struct Proxy {
 #[derive(Debug)]
 pub(crate) struct State {
     certs: CertCache,
-    connector: Connector,
+    pub(crate) connector: Connector,
     body_limit: usize,
     bus: Bus,
     next_id: AtomicU64,
@@ -226,6 +233,12 @@ impl Proxy {
         let listener = TcpListener::bind(config.listen)
             .await
             .with_context(|| format!("binding {}", config.listen))?;
+        let listen = listener.local_addr()?;
+        if let Some(proxy) = &config.upstream_proxy
+            && same_machine(proxy.host(), proxy.port(), listen)
+        {
+            bail!("the upstream proxy {proxy} is this proxy's own listener {listen}");
+        }
         let bus = Bus::new();
         config.pauses.attach(bus.clone());
         let store = FlowStore::with_ws_messages(config.max_flows, config.ws.max_messages);
@@ -233,13 +246,16 @@ impl Proxy {
         drop(store.follow(bus.subscribe()));
         let state = State {
             certs: CertCache::new(ca),
-            connector: Connector::new(&config.upstream)?,
+            connector: Connector::new(
+                &config.upstream,
+                Route::new(config.upstream_proxy, config.upstream_bypass),
+            )?,
             body_limit: config.body_limit,
             bus,
             next_id: AtomicU64::new(0),
             interceptors: config.interceptors,
             pause_timeout: config.pause_timeout,
-            listen: listener.local_addr()?,
+            listen,
             refused: Vec::new(),
             pairing: config.pairing,
             passthrough: config.passthrough,
@@ -379,6 +395,12 @@ async fn proxy_request(
         let port = authority.port_u16().unwrap_or(443);
         if state.refuses(&host, port) {
             return refused();
+        }
+        if same_machine(&host, port, state.listen) {
+            return text(
+                StatusCode::LOOP_DETECTED,
+                &format!("{} refuses a tunnel to its own listener\n", crate::NAME),
+            );
         }
         tokio::spawn(async move {
             if let Ok(upgraded) = hyper::upgrade::on(request).await {
@@ -534,7 +556,7 @@ async fn pass_through<S>(
         duration_ms: None,
     };
     let result = async {
-        let mut server = upstream::open_raw(host, port).await?;
+        let mut server = upstream::open_raw(&state.connector, host, port).await?;
         server.write_all(&raw).await?;
         let (up, down) = tokio::io::copy_bidirectional(&mut io, &mut server).await?;
         anyhow::Ok((up, down))
@@ -623,7 +645,7 @@ impl Target {
             };
             upstream::open_tls(connector, host, self.port, self.offer_h2, upgrades).await
         } else {
-            upstream::open_plain(&self.host, self.port, upgrades).await
+            upstream::open_plain(connector, &self.host, self.port, upgrades).await
         }
     }
 }
@@ -704,6 +726,9 @@ where
         Ok(sender) => sender,
         Err(e) => return fail(state, record, &request_capture, start, &format!("{e:#}")),
     };
+    if sender.via_upstream_proxy() {
+        record.flags.push(Flag::UpstreamProxy);
+    }
     if let Err(e) = prepare(
         &mut parts,
         sender.version(),

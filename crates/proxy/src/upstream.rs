@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use http::{Request, Response};
+use http::{HeaderValue, Request, Response};
 use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -15,20 +15,23 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::proxy::{ProxyBody, UpstreamTls};
+use crate::upstream_proxy::{self, Kind, Route};
 
 /// Limit on connecting to a server, DNS included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// TLS settings toward servers: one config offering h2 and HTTP/1.1, one offering only
 /// HTTP/1.1, picked by what the client offered.
+/// Also holds the route: which connections go through an upstream proxy.
 #[derive(Debug, Clone)]
 pub(crate) struct Connector {
     h2: Arc<ClientConfig>,
     h1: Arc<ClientConfig>,
+    route: Route,
 }
 
 impl Connector {
-    pub(crate) fn new(tls: &UpstreamTls) -> anyhow::Result<Self> {
+    pub(crate) fn new(tls: &UpstreamTls, route: Route) -> anyhow::Result<Self> {
         let base = match tls {
             UpstreamTls::Verify { extra_roots } => {
                 let mut roots = RootCertStore {
@@ -54,47 +57,96 @@ impl Connector {
         Ok(Self {
             h2: with_alpn(&[b"h2", b"http/1.1"]),
             h1: with_alpn(&[b"http/1.1"]),
+            route,
         })
     }
 }
 
 /// A connection ready for requests.
 #[derive(Debug, Clone)]
-pub(crate) enum Sender {
+pub(crate) struct Sender {
+    conn: Conn,
+    via: Via,
+}
+
+#[derive(Debug, Clone)]
+enum Conn {
     H1(Arc<tokio::sync::Mutex<http1::SendRequest<ProxyBody>>>),
     H2(http2::SendRequest<ProxyBody>),
 }
 
+/// How a connection reaches the server.
+#[derive(Debug, Clone)]
+enum Via {
+    Direct,
+    /// A tunnel through the upstream proxy (CONNECT or SOCKS5).
+    Tunnel,
+    /// An HTTP upstream proxy taking absolute-form requests, with its
+    /// `Proxy-Authorization` value.
+    Forward(Option<HeaderValue>),
+}
+
 impl Sender {
     pub(crate) fn is_closed(&self) -> bool {
-        match self {
-            Self::H1(sender) => sender.try_lock().is_ok_and(|s| s.is_closed()),
-            Self::H2(sender) => sender.is_closed(),
+        match &self.conn {
+            Conn::H1(sender) => sender.try_lock().is_ok_and(|s| s.is_closed()),
+            Conn::H2(sender) => sender.is_closed(),
         }
     }
 
     pub(crate) fn version(&self) -> http::Version {
-        match self {
-            Self::H1(_) => http::Version::HTTP_11,
-            Self::H2(_) => http::Version::HTTP_2,
+        match &self.conn {
+            Conn::H1(_) => http::Version::HTTP_11,
+            Conn::H2(_) => http::Version::HTTP_2,
         }
     }
 
+    /// Whether the connection goes through the upstream proxy.
+    pub(crate) fn via_upstream_proxy(&self) -> bool {
+        !matches!(self.via, Via::Direct)
+    }
+
     /// Sends `request`. HTTP/1.1 requests wait for the previous response body to finish.
+    /// Through an HTTP upstream proxy, the target becomes absolute-form and the proxy's
+    /// credentials are added after the request was recorded.
     pub(crate) async fn send(
         &self,
-        request: Request<ProxyBody>,
+        mut request: Request<ProxyBody>,
     ) -> hyper::Result<Response<Incoming>> {
-        match self {
-            Self::H1(sender) => {
+        if let Via::Forward(auth) = &self.via {
+            absolute_form(&mut request, auth.as_ref());
+        }
+        match &self.conn {
+            Conn::H1(sender) => {
                 let mut sender = sender.lock().await;
                 sender.ready().await?;
                 let response = sender.send_request(request);
                 drop(sender);
                 response.await
             }
-            Self::H2(sender) => sender.clone().send_request(request).await,
+            Conn::H2(sender) => sender.clone().send_request(request).await,
         }
+    }
+}
+
+/// Rewrites an origin-form HTTP/1.1 request to `http://host/path` for an HTTP proxy.
+fn absolute_form(request: &mut Request<ProxyBody>, auth: Option<&HeaderValue>) {
+    let host = request
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned);
+    let path = request
+        .uri()
+        .path_and_query()
+        .map_or("/", http::uri::PathAndQuery::as_str);
+    if let Some(uri) = host.and_then(|host| format!("http://{host}{path}").parse().ok()) {
+        *request.uri_mut() = uri;
+    }
+    if let Some(auth) = auth {
+        request
+            .headers_mut()
+            .insert(http::header::PROXY_AUTHORIZATION, auth.clone());
     }
 }
 
@@ -106,13 +158,19 @@ pub(crate) struct Opened {
     pub(crate) tls: Option<Duration>,
 }
 
-async fn tcp(host: &str, port: u16) -> anyhow::Result<TcpStream> {
+/// A TCP stream to `host:port`, tunnelled through the upstream proxy when the route says
+/// so.
+async fn tcp(connector: &Connector, host: &str, port: u16) -> anyhow::Result<(TcpStream, Via)> {
+    if let Some(proxy) = connector.route.via(host) {
+        let stream = upstream_proxy::tunnel(proxy, host, port, CONNECT_TIMEOUT).await?;
+        return Ok((stream, Via::Tunnel));
+    }
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
         .map_err(|_| anyhow!("connecting to {host}:{port} timed out"))?
         .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_nodelay(true)?;
-    Ok(stream)
+    Ok((stream, Via::Direct))
 }
 
 /// Opens a TLS connection to `host:port`, offering h2 when `offer_h2`.
@@ -124,7 +182,7 @@ pub(crate) async fn open_tls(
     upgrades: bool,
 ) -> anyhow::Result<Opened> {
     let start = Instant::now();
-    let tcp = tcp(host, port).await?;
+    let (tcp, via) = tcp(connector, host, port).await?;
     let connect = start.elapsed();
     let config = if offer_h2 && !upgrades {
         &connector.h2
@@ -138,33 +196,57 @@ pub(crate) async fn open_tls(
         .with_context(|| format!("TLS handshake with {host}:{port}"))?;
     let tls_time = start.elapsed().saturating_sub(connect);
     let h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
-    let sender = handshake(TokioIo::new(tls), h2, upgrades).await?;
+    let conn = handshake(TokioIo::new(tls), h2, upgrades).await?;
     Ok(Opened {
-        sender,
+        sender: Sender { conn, via },
         connect,
         tls: Some(tls_time),
     })
 }
 
-/// Opens a plain HTTP/1.1 connection to `host:port`.
-pub(crate) async fn open_plain(host: &str, port: u16, upgrades: bool) -> anyhow::Result<Opened> {
+/// Opens a plain HTTP/1.1 connection to `host:port`. Through an HTTP upstream proxy,
+/// ordinary requests go to the proxy in absolute form; upgrades take a CONNECT tunnel.
+pub(crate) async fn open_plain(
+    connector: &Connector,
+    host: &str,
+    port: u16,
+    upgrades: bool,
+) -> anyhow::Result<Opened> {
     let start = Instant::now();
-    let tcp = tcp(host, port).await?;
+    let (tcp, via) = match connector.route.via(host) {
+        Some(proxy) if proxy.kind() == Kind::Http && !upgrades => {
+            let stream = upstream_proxy::connect_forward(proxy, CONNECT_TIMEOUT).await?;
+            let auth = proxy
+                .basic_auth()
+                .map(|auth| {
+                    let mut value = HeaderValue::from_str(&auth)?;
+                    value.set_sensitive(true);
+                    anyhow::Ok(value)
+                })
+                .transpose()?;
+            (stream, Via::Forward(auth))
+        }
+        _ => tcp(connector, host, port).await?,
+    };
     let connect = start.elapsed();
-    let sender = handshake(TokioIo::new(tcp), false, upgrades).await?;
+    let conn = handshake(TokioIo::new(tcp), false, upgrades).await?;
     Ok(Opened {
-        sender,
+        sender: Sender { conn, via },
         connect,
         tls: None,
     })
 }
 
 /// Opens a raw TCP connection for a pass-through tunnel.
-pub(crate) async fn open_raw(host: &str, port: u16) -> anyhow::Result<TcpStream> {
-    tcp(host, port).await
+pub(crate) async fn open_raw(
+    connector: &Connector,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<TcpStream> {
+    Ok(tcp(connector, host, port).await?.0)
 }
 
-async fn handshake<I>(io: TokioIo<I>, h2: bool, upgrades: bool) -> anyhow::Result<Sender>
+async fn handshake<I>(io: TokioIo<I>, h2: bool, upgrades: bool) -> anyhow::Result<Conn>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -173,7 +255,7 @@ where
             .handshake(io)
             .await?;
         tokio::spawn(connection);
-        return Ok(Sender::H2(sender));
+        return Ok(Conn::H2(sender));
     }
     let (sender, connection) = http1::Builder::new()
         .preserve_header_case(true)
@@ -184,7 +266,7 @@ where
     } else {
         tokio::spawn(connection);
     }
-    Ok(Sender::H1(Arc::new(tokio::sync::Mutex::new(sender))))
+    Ok(Conn::H1(Arc::new(tokio::sync::Mutex::new(sender))))
 }
 
 /// Accepts any server certificate; used only with `--upstream-insecure`. Signatures are
