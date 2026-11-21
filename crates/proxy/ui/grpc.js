@@ -121,7 +121,10 @@
       head.append(el("span", "grpc-note", "no grpc-status"));
     }
     container.append(head);
-    if (call.message) container.append(el("p", "grpc-error", "grpc-message: " + call.message));
+    if (call.message) {
+      const cls = call.status === 0 ? "grpc-note" : "grpc-error";
+      container.append(el("p", cls, "grpc-message: " + call.message));
+    }
     container.append(streamView("Request", call.request), streamView("Response", call.response));
     if (call.trailers.length > 0) {
       const section = el("section", "grpc-section");
