@@ -42,8 +42,8 @@ enum Command {
     CaInstallHelp(Option<PathBuf>),
     /// `ca install|uninstall|status [--yes]`
     CaTrust(CaTrustCommand, Option<PathBuf>, Confirm),
-    /// `system-proxy on|off|status [--port P]`
-    SystemProxy(SystemProxyCommand, Option<PathBuf>, u16),
+    /// `system-proxy on|off|status [--listen ADDR | --port P]`
+    SystemProxy(SystemProxyCommand, Option<PathBuf>),
     /// `export --har OUT [--session FILE] [--filter Q]`
     Export {
         har: PathBuf,
@@ -111,7 +111,8 @@ enum CaTrustCommand {
 /// `system-proxy on|off|status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemProxyCommand {
-    On,
+    /// Point the system proxy at the proxy listening on this address.
+    On(SocketAddr),
     Off,
     Status,
 }
@@ -181,7 +182,7 @@ Usage:
   {NAME} android setup|reset [--serial S] [--port P] [--config-dir DIR]
   {NAME} ca path|show|install-help [--config-dir DIR]
   {NAME} ca install|uninstall|status [--yes] [--config-dir DIR]
-  {NAME} system-proxy on|off|status [--port P] [--config-dir DIR]
+  {NAME} system-proxy on|off|status [--listen ADDR | --port P] [--allow-remote] [--config-dir DIR]
   {NAME} export --har OUT.har [--session FILE] [--filter QUERY]   (no --session: JSON Lines on stdin)
   {NAME} import --har IN.har --session OUT.jsonl
   {NAME} view --session FILE [--filter QUERY]
@@ -199,8 +200,9 @@ Commands:
                         user Root store; Linux: prints the commands); asks for `yes` first
   ca uninstall          remove exactly that certificate, matched by its SHA-256 fingerprint
   ca status             say whether the CA is trusted
-  system-proxy on       point this computer's system proxy at 127.0.0.1:P, saving the old
-                        settings first; `off` restores them, `status` shows them
+  system-proxy on       point this computer's system proxy at the proxy's address (--listen,
+                        or 127.0.0.1:P), saving the old settings first; `off` restores them,
+                        `status` shows them
   replay                send flow N of a session file again through a running proxy (--via),
                         as an ordinary client, and print the status line; see docs/replay.md
 
@@ -208,7 +210,8 @@ Options:
   -h, --help            print this help; after a command, such as `{NAME} ca --help`, the
                         help of that command
   -V, --version         print the version
-  --listen ADDR         address to listen on (default 127.0.0.1:8080)
+  --listen ADDR         address to listen on (default 127.0.0.1:8080); for `system-proxy on`,
+                        the address of the running proxy
   --json                print one JSON object per line instead of text
   --body-limit BYTES    body bytes kept per request and response (default {DEFAULT_BODY_LIMIT})
   --upstream-insecure   do not verify server certificates (dangerous)
@@ -216,7 +219,7 @@ Options:
                         http://, socks5:// or socks5h:// (remote DNS), optional USER:PASS@
   --upstream-bypass LIST  comma-separated hosts, *.domains, IPs and CIDRs that go direct
                         (repeatable); loopback and localhost always go direct
-  --allow-remote        allow a non-loopback --listen address (dangerous)
+  --allow-remote        allow a non-loopback --listen address (dangerous), also for `system-proxy on`
   --config-dir DIR      where the CA is kept (default: the platform config dir)
   --max-flows N         flows kept in memory for the UI and API (default {DEFAULT_MAX_FLOWS})
   --pause-timeout SECS  how long a breakpoint waits before the exchange goes on (default {pause})
@@ -228,7 +231,7 @@ Options:
   --system-proxy        point the system proxy at this proxy while it runs; restored on exit
                         (Ctrl-C, SIGTERM, SIGHUP); after a crash, `system-proxy off` restores
   --yes                 ca install/uninstall: do not ask for confirmation
-  --port P              proxy port for connect and android (default {DEFAULT_PORT})
+  --port P              proxy port for connect, android and system-proxy on (default {DEFAULT_PORT})
   --lan-ip IP           connect: the address to listen on, instead of the detected one
   --allow-client NET    connect: pre-approve this IP or CIDR (repeatable)
   --serial S            android: the adb device to use when several are connected
@@ -391,17 +394,23 @@ Options:
             "{NAME} system-proxy: point this computer's system proxy at wirust
 
 Usage:
-  {NAME} system-proxy on|off|status [--port P] [--config-dir DIR]
+  {NAME} system-proxy on|off|status [--listen ADDR | --port P] [--allow-remote] [--config-dir DIR]
 
-  on       save the current settings, then set the web and secure web proxy to 127.0.0.1:P
+  on       save the current settings, then set the web and secure web proxy to the address of
+           the running proxy: --listen ADDR, or 127.0.0.1:P
   off      restore the saved settings
   status   show the current settings and whether wirust changed them
 
-A plain run does the same while it lives with --system-proxy and restores on exit. After a
-crash, `{NAME} system-proxy off` restores the old settings. See docs/desktop.md.
+A plain run does the same while it lives with --system-proxy, using the address it really
+listens on, and restores on exit. After a crash, `{NAME} system-proxy off` restores the old
+settings. See docs/desktop.md.
 
 Options:
-  --port P              proxy port (default {DEFAULT_PORT})
+  --listen ADDR         on: the address the proxy listens on, such as 127.0.0.1:9090; a
+                        wildcard such as 0.0.0.0:9090 points at 127.0.0.1
+  --port P              on: shorthand for --listen 127.0.0.1:P (default {DEFAULT_PORT}); given
+                        together with --listen, both must name the same port
+  --allow-remote        on: accept a --listen address that is not loopback, a wildcard included
   --config-dir DIR      where the saved settings are kept (default: the platform config dir)
 "
         ),
@@ -545,6 +554,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
     let mut mobile = MobileArgs::default();
     let mut words = Vec::new();
     let mut help = false;
+    let mut listen_given = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
@@ -559,6 +569,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                 run.listen = value(arg)?
                     .parse()
                     .context("--listen takes IP:PORT, such as 127.0.0.1:8080")?;
+                listen_given = true;
             }
             "--json" => run.json = true,
             "--body-limit" => {
@@ -673,12 +684,16 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         ["ca", "status"] => Ok(Command::CaTrust(CaTrustCommand::Status, dir, run.confirm)),
         ["system-proxy", action] => {
             let action = match action {
-                "on" => SystemProxyCommand::On,
+                "on" => SystemProxyCommand::On(system_proxy_target(
+                    listen_given.then_some(run.listen),
+                    mobile.port,
+                    run.allow_remote,
+                )?),
                 "off" => SystemProxyCommand::Off,
                 "status" => SystemProxyCommand::Status,
                 _ => bail!("system-proxy takes on, off or status"),
             };
-            Ok(Command::SystemProxy(action, dir, mobile.port()))
+            Ok(Command::SystemProxy(action, dir))
         }
         ["export"] => Ok(Command::Export {
             har: run.har.context("export needs --har OUT.har")?,
@@ -707,6 +722,34 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
 
 fn config_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     dir.map_or_else(Ca::default_dir, Ok)
+}
+
+/// The address `system-proxy on` points at: `--listen`, or `--port` on loopback (default
+/// port 8080). Both must agree on the port. A non-loopback address, a wildcard included, needs
+/// `--allow-remote`, as it does for the proxy itself; a wildcard then points at loopback.
+fn system_proxy_target(
+    listen: Option<SocketAddr>,
+    port: Option<u16>,
+    allow_remote: bool,
+) -> anyhow::Result<SocketAddr> {
+    let addr = match (listen, port) {
+        (Some(listen), Some(port)) => {
+            anyhow::ensure!(
+                listen.port() == port,
+                "--listen {listen} and --port {port} name different ports; give one of them"
+            );
+            listen
+        }
+        (Some(listen), None) => listen,
+        (None, port) => SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(DEFAULT_PORT))),
+    };
+    anyhow::ensure!(
+        addr.ip().is_loopback() || allow_remote,
+        "system-proxy on {addr}: this is not a loopback address, so the system proxy would send \
+         this computer's web traffic to another host or to an open port; pass --allow-remote if \
+         that is intended"
+    );
+    Ok(addr)
 }
 
 fn install_help(path: &std::path::Path) -> String {
@@ -770,7 +813,7 @@ fn execute(command: Command) -> anyhow::Result<()> {
             print!("{}", install_help(&Ca::cert_path(&dir)));
         }
         Command::CaTrust(action, dir, confirm) => ca_trust(action, &config_dir(dir)?, confirm)?,
-        Command::SystemProxy(action, dir, port) => system_proxy(action, &config_dir(dir)?, port)?,
+        Command::SystemProxy(action, dir) => system_proxy(action, &config_dir(dir)?)?,
         Command::Run(args, mobile) => run(args, &mobile, None)?,
         Command::Connect(mut args, mobile) => {
             let ip = match mobile.lan_ip {
@@ -862,23 +905,17 @@ fn ca_trust(action: CaTrustCommand, dir: &std::path::Path, confirm: Confirm) -> 
 }
 
 /// `system-proxy on|off|status`.
-fn system_proxy(
-    action: SystemProxyCommand,
-    dir: &std::path::Path,
-    port: u16,
-) -> anyhow::Result<()> {
+fn system_proxy(action: SystemProxyCommand, dir: &std::path::Path) -> anyhow::Result<()> {
     let proxy = SystemProxy::new(SystemRunner, Platform::current(), dir);
     match action {
-        SystemProxyCommand::On => {
-            let listen = SocketAddr::from(([127, 0, 0, 1], port));
-            match proxy.enable(listen)? {
-                Enabled::Changed(text) => println!(
-                    "{text}\nUndo with `{NAME} system-proxy off`; until then programs need the \
-                     proxy running on port {port}."
-                ),
-                Enabled::Manual(text) => print!("{text}"),
-            }
-        }
+        SystemProxyCommand::On(listen) => match proxy.enable(listen)? {
+            Enabled::Changed(text) => println!(
+                "{text}\nUndo with `{NAME} system-proxy off`; until then programs need the \
+                     proxy running on port {}.",
+                listen.port()
+            ),
+            Enabled::Manual(text) => print!("{text}"),
+        },
         SystemProxyCommand::Off => {
             if proxy.restore()? {
                 println!("restored the system proxy settings from before {NAME} changed them");
@@ -1341,12 +1378,8 @@ mod tests {
             Command::CaTrust(CaTrustCommand::Uninstall, None, Confirm::Ask)
         ));
         assert!(matches!(
-            parse(&args("system-proxy on --port 9000"))?,
-            Command::SystemProxy(SystemProxyCommand::On, None, 9000)
-        ));
-        assert!(matches!(
             parse(&args("system-proxy status"))?,
-            Command::SystemProxy(SystemProxyCommand::Status, None, DEFAULT_PORT)
+            Command::SystemProxy(SystemProxyCommand::Status, None)
         ));
         assert!(parse(&args("system-proxy maybe")).is_err());
         let Command::Run(run, _) = parse(&args("--system-proxy"))? else {
@@ -1354,6 +1387,91 @@ mod tests {
         };
         assert_eq!(run.system_proxy, SystemProxyFlag::On);
         Ok(())
+    }
+
+    /// The address `system-proxy on` points at for a command line, or the error text.
+    fn system_proxy_on(line: &str) -> Result<SocketAddr, String> {
+        match parse(&args(line)) {
+            Ok(Command::SystemProxy(SystemProxyCommand::On(addr), _)) => Ok(addr),
+            Ok(other) => panic!("expected system-proxy on, got {other:?}"),
+            Err(e) => Err(format!("{e:#}")),
+        }
+    }
+
+    #[test]
+    fn system_proxy_on_takes_the_port_from_port_or_listen() {
+        let on = |line: &str| system_proxy_on(line).map(|addr| addr.to_string());
+        assert_eq!(on("system-proxy on"), Ok("127.0.0.1:8080".to_owned()));
+        assert_eq!(
+            on("system-proxy on --port 9000"),
+            Ok("127.0.0.1:9000".to_owned())
+        );
+        assert_eq!(
+            on("system-proxy on --listen 127.0.0.1:9001"),
+            Ok("127.0.0.1:9001".to_owned())
+        );
+        // The host of --listen is kept, not only its port.
+        assert_eq!(
+            on("system-proxy on --listen [::1]:9002"),
+            Ok("[::1]:9002".to_owned())
+        );
+        assert_eq!(
+            on("system-proxy on --listen 127.0.0.2:9003 --port 9003"),
+            Ok("127.0.0.2:9003".to_owned())
+        );
+        assert_eq!(
+            on("system-proxy on --port 9004 --listen 127.0.0.1:9004"),
+            Ok("127.0.0.1:9004".to_owned())
+        );
+    }
+
+    #[test]
+    fn system_proxy_on_refuses_disagreeing_ports() {
+        let err = system_proxy_on("system-proxy on --listen 127.0.0.1:9001 --port 9002")
+            .expect_err("two ports");
+        assert!(err.contains("9001") && err.contains("9002"), "{err}");
+        assert!(system_proxy_on("system-proxy on --port 9002 --listen 127.0.0.1:9001").is_err());
+        // --allow-remote does not make them agree, and 8080 is no exception to the rule.
+        assert!(
+            system_proxy_on("system-proxy on --allow-remote --listen 10.0.0.2:9001 --port 9002")
+                .is_err()
+        );
+        assert!(system_proxy_on("system-proxy on --listen 127.0.0.1:9001 --port 8080").is_err());
+    }
+
+    #[test]
+    fn system_proxy_on_refuses_remote_and_wildcard_addresses_without_allow_remote() {
+        for listen in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.168.1.5:8080",
+            "[fe80::1]:8080",
+        ] {
+            let line = format!("system-proxy on --listen {listen}");
+            let err = system_proxy_on(&line).expect_err(&line);
+            assert!(err.contains("--allow-remote"), "{line}: {err}");
+            let allowed = system_proxy_on(&format!("{line} --allow-remote"));
+            assert_eq!(
+                allowed.map(|a| a.to_string()),
+                Ok(listen.to_owned()),
+                "{line}"
+            );
+        }
+        // Loopback is fine without it, and `off` and `status` never look at the address.
+        assert!(system_proxy_on("system-proxy on --listen 127.9.9.9:80").is_ok());
+        assert!(matches!(
+            parse(&args("system-proxy off --listen 0.0.0.0:1 --port 2")),
+            Ok(Command::SystemProxy(SystemProxyCommand::Off, None))
+        ));
+    }
+
+    #[test]
+    fn the_system_proxy_help_describes_its_address_flags() {
+        let page = command_help(&["system-proxy"]).expect("a page");
+        for flag in ["--listen ADDR", "--port P", "--allow-remote"] {
+            assert!(page.contains(flag), "{flag} missing from: {page}");
+        }
+        assert!(usage().contains("system-proxy on|off|status [--listen ADDR | --port P]"));
     }
 
     #[test]
