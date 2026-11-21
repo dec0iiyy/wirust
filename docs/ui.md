@@ -38,7 +38,11 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
 - **Export HAR** (toolbar) downloads `GET /api/v1/har?q=<the search text>` through `fetch`
   with the Bearer header and a Blob link with `download`, so the token never appears in a
   URL. **Copy as cURL** uses `GET /api/v1/flows/{id}/curl` and falls back to the page's own
-  builder (pending flows, older servers).
+  builder (pending flows, older servers). **Copy as...** (`codegen.js`, next to it) opens a
+  list of languages and copies the request as code from `GET /api/v1/flows/{id}/code?lang=`
+  (see [interchange.md](interchange.md#code-export)): Python (requests), JavaScript (fetch),
+  Kotlin (OkHttp), Swift (URLSession), HTTPie and PowerShell. Down opens the list, arrows,
+  Home and End move, Enter picks, Escape closes; pending flows give a message instead.
 - **Breakpoints** (side panel; the toolbar button shows the count, the tab title becomes
   `(2) wirust`, and the button is outlined red while anything is paused; no sound, no
   notifications). Pending pauses come from `GET /api/v1/pauses` on start and on every

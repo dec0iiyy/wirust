@@ -1,0 +1,10 @@
+http \
+  --ignore-stdin \
+  GET \
+  https://api.test/h \
+  user-agent:wirust-test/1.0 \
+  'x-quote:say "hi" it'\''s' \
+  'x-name:Zoë ñ 日本' \
+  'x-back:C:\dir\new' \
+  'x-dollar:$HOME ${x} `id`' \
+  'cookie:a=1; b=2'

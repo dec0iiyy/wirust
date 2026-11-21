@@ -13,7 +13,7 @@ use crate::events::{Filter, FlowStore, StoredFlow};
 use crate::flow::Event;
 use crate::har::{self, Plus, percent_decode};
 use crate::query::{MAX_QUERY_LEN, Query};
-use crate::{curl, events::Flow};
+use crate::{codegen, curl, events::Flow};
 
 /// Answers the interchange routes; `None` leaves the request to `control::route`.
 pub(crate) fn route(
@@ -26,7 +26,10 @@ pub(crate) fn route(
     Some(match segments {
         ["har"] if get => har(store, query),
         ["flows", id, "curl"] if get => curl(store, id),
-        ["har"] | ["flows", _, "curl"] => error(StatusCode::METHOD_NOT_ALLOWED, "wrong method"),
+        ["flows", id, "code"] if get => code(store, id, query),
+        ["har"] | ["flows", _, "curl" | "code"] => {
+            error(StatusCode::METHOD_NOT_ALLOWED, "wrong method")
+        }
         _ => return None,
     })
 }
@@ -104,6 +107,34 @@ fn curl(store: &FlowStore, id: &str) -> Response<Bytes> {
                 StatusCode::OK,
                 "text/plain; charset=utf-8",
                 Bytes::from(curl::command(x) + "\n"),
+            ),
+            Event::TlsFailure(_) | Event::Tunnel(_) => {
+                error(StatusCode::NOT_FOUND, "the flow is not an HTTP exchange")
+            }
+        },
+        Some(StoredFlow::Pending(_)) => {
+            error(StatusCode::CONFLICT, "the exchange is still running")
+        }
+        None => error(StatusCode::NOT_FOUND, "no such flow"),
+    }
+}
+
+/// `GET /api/v1/flows/{id}/code?lang=`: the request as code in one of [`codegen::Lang`].
+fn code(store: &FlowStore, id: &str, query: &str) -> Response<Bytes> {
+    let Some(lang) = param(query, "lang").and_then(codegen::Lang::parse) else {
+        let names: Vec<&str> = codegen::Lang::ALL.iter().map(|l| l.id()).collect();
+        return error(
+            StatusCode::BAD_REQUEST,
+            &format!("lang must be one of {}", names.join(", ")),
+        );
+    };
+    let flow = id.parse().ok().and_then(|id| store.get(id));
+    match flow {
+        Some(StoredFlow::Done(flow)) => match &flow.record {
+            Event::Exchange(x) => respond(
+                StatusCode::OK,
+                "text/plain; charset=utf-8",
+                Bytes::from(codegen::generate(lang, x)),
             ),
             Event::TlsFailure(_) | Event::Tunnel(_) => {
                 error(StatusCode::NOT_FOUND, "the flow is not an HTTP exchange")
@@ -203,5 +234,49 @@ mod tests {
         let post = route(&store, &Method::POST, &["har"], "").expect("handled");
         assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert!(route(&store, &Method::GET, &["flows"], "").is_none());
+    }
+
+    #[test]
+    fn code_route_answers_plain_text_per_language() {
+        let store = store();
+        let path = ["flows", "2", "code"];
+        for lang in codegen::Lang::ALL {
+            let query = format!("lang={}", lang.id());
+            let ok = route(&store, &Method::GET, &path, &query).expect("handled");
+            assert_eq!(ok.status(), StatusCode::OK, "{}", lang.id());
+            assert_eq!(
+                ok.headers()[header::CONTENT_TYPE],
+                "text/plain; charset=utf-8"
+            );
+            let text = String::from_utf8_lossy(ok.body());
+            assert!(text.contains("https://b.test/x"), "{}: {text}", lang.id());
+        }
+    }
+
+    #[test]
+    fn code_route_refuses_unknown_languages_flows_and_methods() {
+        let store = store();
+        for query in ["", "lang=", "lang=cobol", "lang=Python", "other=python"] {
+            let bad = route(&store, &Method::GET, &["flows", "2", "code"], query).expect("handled");
+            assert_eq!(bad.status(), StatusCode::BAD_REQUEST, "{query:?}");
+            let body = String::from_utf8_lossy(bad.body());
+            assert!(
+                body.contains("python") && body.contains("powershell"),
+                "{body}"
+            );
+        }
+        for id in ["9", "x", "-1"] {
+            let missing = route(&store, &Method::GET, &["flows", id, "code"], "lang=python")
+                .expect("handled");
+            assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{id}");
+        }
+        let post = route(
+            &store,
+            &Method::POST,
+            &["flows", "2", "code"],
+            "lang=python",
+        )
+        .expect("handled");
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }

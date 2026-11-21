@@ -1,0 +1,15 @@
+import requests
+
+response = requests.get(
+    "https://api.test/h",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "x-quote": "say \"hi\" it's",
+        "x-name": "Zoë ñ 日本".encode("utf-8"),
+        "x-back": r'C:\dir\new',
+        "x-dollar": "$HOME ${x} `id`",
+        "cookie": "a=1; b=2",
+    },
+)
+print(response.status_code)
+print(response.text)

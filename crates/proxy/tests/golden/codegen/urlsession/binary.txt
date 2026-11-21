@@ -1,0 +1,19 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+var request = URLRequest(url: URL(string: "https://api.test/blob")!)
+request.httpMethod = "PUT"
+request.setValue("wirust-test/1.0", forHTTPHeaderField: "user-agent")
+request.setValue("application/octet-stream", forHTTPHeaderField: "content-type")
+request.httpBody = Data(base64Encoded: "/wBhAP8=")!
+
+let done = DispatchSemaphore(value: 0)
+URLSession.shared.dataTask(with: request) { data, response, error in
+    if let http = response as? HTTPURLResponse { print(http.statusCode) }
+    if let data = data { print(String(decoding: data, as: UTF8.self)) }
+    if let error = error { print(error) }
+    done.signal()
+}.resume()
+done.wait()

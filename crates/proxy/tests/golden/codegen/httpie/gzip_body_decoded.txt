@@ -1,0 +1,8 @@
+http \
+  --raw \
+  'café	tab
+ok' \
+  POST \
+  https://api.test/upload \
+  user-agent:wirust-test/1.0 \
+  'content-type:text/plain; charset=utf-8'

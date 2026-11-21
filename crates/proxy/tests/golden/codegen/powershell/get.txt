@@ -1,0 +1,6 @@
+$headers = @{
+    'accept' = 'application/json'
+}
+$response = Invoke-WebRequest -UseBasicParsing -Method 'GET' -Uri 'https://api.test/users/42' -Headers $headers -UserAgent 'wirust-test/1.0'
+$response.StatusCode
+$response.Content

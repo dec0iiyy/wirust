@@ -1,0 +1,12 @@
+import requests
+
+response = requests.post(
+    "https://api.test/items",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "content-type": "application/json",
+    },
+    data=r'{"user":"zoe","price":"$5","say":"a \"b\"\n"}',
+)
+print(response.status_code)
+print(response.text)

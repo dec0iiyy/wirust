@@ -1,0 +1,4 @@
+$body = 'a=1&b=hello+world&c=%7B%7D'
+$response = Invoke-WebRequest -UseBasicParsing -Method 'POST' -Uri 'https://api.test/login' -ContentType 'application/x-www-form-urlencoded' -UserAgent 'wirust-test/1.0' -Body $body
+$response.StatusCode
+$response.Content

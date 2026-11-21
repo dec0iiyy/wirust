@@ -1,0 +1,12 @@
+// Browsers ignore these headers (Node sends them): user-agent
+fetch("https://api.test/blob", {
+  method: "PUT",
+  headers: {
+    "user-agent": "wirust-test/1.0",
+    "content-type": "application/octet-stream",
+  },
+  body: Uint8Array.from(atob("/wBhAP8="), (c) => c.charCodeAt(0)),
+}).then(async (response) => {
+  console.log(response.status);
+  console.log(await response.text());
+});

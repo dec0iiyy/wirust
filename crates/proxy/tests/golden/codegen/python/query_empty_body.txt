@@ -1,0 +1,10 @@
+import requests
+
+response = requests.post(
+    "https://api.test/search?q=a%20b&x=1&y=%7B%7D",
+    headers={
+        "user-agent": "wirust-test/1.0",
+    },
+)
+print(response.status_code)
+print(response.text)

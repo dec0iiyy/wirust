@@ -1,0 +1,11 @@
+// Browsers ignore these headers (Node sends them): user-agent
+fetch("https://api.test/users/42", {
+  method: "GET",
+  headers: {
+    "user-agent": "wirust-test/1.0",
+    "accept": "application/json",
+  },
+}).then(async (response) => {
+  console.log(response.status);
+  console.log(await response.text());
+});

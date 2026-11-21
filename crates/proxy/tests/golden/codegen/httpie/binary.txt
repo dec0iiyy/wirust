@@ -1,0 +1,5 @@
+printf '%s' /wBhAP8= | base64 -d | http \
+  PUT \
+  https://api.test/blob \
+  user-agent:wirust-test/1.0 \
+  content-type:application/octet-stream

@@ -91,6 +91,11 @@ Without `--ui`, it prints one line per exchange (`--json` for JSON Lines):
 13:31:07 TLS-FAIL example.com via example.com:443  received fatal alert: UnknownCA  (ja4 t13d4907h2_...)  hint: the client does not trust the CA or pins certificates
 ```
 
+When a client keeps rejecting the CA, only its first `TLS-FAIL` per host and error is printed
+in full; the repeats within 30 seconds become one line such as
+`13:31:09 TLS-FAIL example.com (x4 more in the last 30 s)  received fatal alert: UnknownCA`.
+The UI, the session file and `--json` still have every failure.
+
 ## Connect a phone
 
 ```sh
@@ -118,7 +123,7 @@ profile. Limits, from the platforms' documentation:
 |---|---|
 | HTTPS interception | HTTP/1.1 and HTTP/2 through CONNECT; plain `http://` too; server certificates checked against the Mozilla roots |
 | Client TLS fingerprint | JA4, JA3 hash, TLS version, SNI, ALPN and the matched known client; the JA4 also for failed handshakes and passthrough tunnels |
-| Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL; [docs/ui.md](docs/ui.md) |
+| Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL, Python, fetch, OkHttp, URLSession, HTTPie or PowerShell; [docs/ui.md](docs/ui.md) |
 | Search | `host:` `method:` `status:5xx` `type:json` and more, in the UI, `view` and `export`; [docs/interchange.md](docs/interchange.md) |
 | Rules | block, status, map local, map remote, header and body rewrite (regex, JSON path), delay, throttle; TOML file reloaded on change, editable in the UI; [docs/rules.md](docs/rules.md) |
 | Scripting | sandboxed [Rhai](https://rhai.rs) scripts with `on_request` / `on_response` hooks (`--script`): headers, decoded bodies, mock answers, block, delay, flow flags; reloaded on change; [docs/scripting.md](docs/scripting.md) |

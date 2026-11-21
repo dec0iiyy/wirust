@@ -1,0 +1,32 @@
+/* The "Copy as..." menu (codegen.js); colours come from style.css. */
+
+.codegen { position: relative; display: inline-block; }
+
+.codegen-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+}
+.codegen-menu[hidden] { display: none; }
+
+.codegen-item {
+  text-align: left;
+  border: 0;
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.codegen-item:hover,
+.codegen-item:focus-visible { background: var(--bg-alt); outline: 1px solid var(--accent); outline-offset: -1px; }

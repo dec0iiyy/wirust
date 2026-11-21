@@ -37,8 +37,23 @@ at `/usr/local/share/ca-certificates/wirust.crt` or
 ### `wirust system-proxy on | off | status`, `--system-proxy`
 
 `--system-proxy` turns the system proxy on once the proxy is listening and restores it on
-exit. `system-proxy on` does the same without running the proxy (it points at
-`127.0.0.1:8080`, or `--port P`), and `system-proxy off` restores.
+exit; it points at the address the proxy really listens on, so `--listen 127.0.0.1:9090` or
+port `0` (a free port) work too. `system-proxy on` does the same without running the proxy,
+and `system-proxy off` restores.
+
+`system-proxy on` takes the proxy's address like a plain run does:
+
+```sh
+wirust system-proxy on                          # 127.0.0.1:8080
+wirust system-proxy on --port 9090              # 127.0.0.1:9090
+wirust system-proxy on --listen 127.0.0.1:9090  # the same
+wirust system-proxy on --listen [::1]:9090      # the host is used too
+```
+
+`--port P` is the shorthand for `--listen 127.0.0.1:P`. Given together, they must name the same
+port, or the command fails. Like the proxy itself, `system-proxy on` refuses an address that is
+not loopback, a wildcard such as `0.0.0.0:9090` included, unless you add `--allow-remote`; a
+wildcard then points the system proxy at `127.0.0.1`. `off` and `status` ignore these options.
 
 Before changing anything, the current settings are saved to `system-proxy.json` (mode `0600`)
 in the config directory. Restoring reads that file and then deletes it, so:

@@ -1,0 +1,13 @@
+import requests
+
+response = requests.post(
+    "https://api.test/upload",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "content-type": "text/plain; charset=utf-8",
+    },
+    data="""café	tab
+ok""".encode("utf-8"),
+)
+print(response.status_code)
+print(response.text)

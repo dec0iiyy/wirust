@@ -1,0 +1,13 @@
+import base64
+import requests
+
+response = requests.put(
+    "https://api.test/blob",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "content-type": "application/octet-stream",
+    },
+    data=base64.b64decode("/wBhAP8="),
+)
+print(response.status_code)
+print(response.text)

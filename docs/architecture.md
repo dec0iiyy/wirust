@@ -32,7 +32,7 @@ built in parallel without editing the same functions.
 | `passthrough.rs` | `--passthrough`/`--decrypt-only` patterns, the live `Passthrough` lists, the undecrypted relay; `docs/passthrough.md` |
 | `throttle.rs` | `Throttled`, the bandwidth-capped streaming body |
 | `har.rs`, `har_api.rs`, `session.rs` | HAR 1.2 export and import, the `/api/v1/har` route, session files (`--session`, `export`, `import`, `view`); `docs/interchange.md` |
-| `query.rs`, `curl.rs` | the search query language (`?q=`, `--filter`) and the cURL export (`/api/v1/flows/{id}/curl`) |
+| `query.rs`, `curl.rs`, `codegen.rs` | the search query language (`?q=`, `--filter`), the cURL export (`/api/v1/flows/{id}/curl`) and the code export in six languages (`/api/v1/flows/{id}/code`) |
 | `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `permessage-deflate` inflation of the recorded copy, `GET` and `POST /api/v1/flows/{id}/messages` (`ws::Live` holds the open connections that accept injected messages); `docs/websocket.md` |
 | `grpc.rs`, `protobuf.rs`, `schema.rs`, `grpc_api.rs` | gRPC, gRPC-Web and protobuf decoding of recorded bodies: framing, inflating, status from `response_trailers`, the schema-less decoder, `.proto` schemas compiled with `protox` and decoded with `prost-reflect`, `GET /api/v1/flows/{id}/grpc` and `GET /api/v1/proto`; `docs/grpc.md` |
 | `wireguard.rs`, `wireguard/` | experimental, cargo feature `wireguard` only: keys and peers (`config.rs`), the UDP listener with boringtun sessions, a smoltcp stack and the DNS relay (`server.rs`); terminated connections go to `serve_transparent` in `proxy.rs`; `docs/wireguard.md` |
