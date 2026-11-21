@@ -122,6 +122,7 @@ profile. Limits, from the platforms' documentation:
 | Sessions and HAR | append flows to a JSON Lines session file; export HAR 1.2 from the UI or CLI, import HAR from browser dev tools |
 | WebSocket | text, binary and control messages of HTTP/1.1 WebSockets, with a Messages tab; [docs/websocket.md](docs/websocket.md) |
 | TLS passthrough | relay chosen hosts undecrypted (`--passthrough`, `--decrypt-only`); [docs/passthrough.md](docs/passthrough.md) |
+| Upstream proxy | chain to an HTTP (CONNECT) or SOCKS5 proxy with a bypass list (`--upstream-proxy`, `--upstream-bypass`); [docs/upstream-proxy.md](docs/upstream-proxy.md) |
 | Phones | QR-code setup with per-device approval, adb setup for Android; [docs/mobile.md](docs/mobile.md) |
 
 ## Compared with
@@ -143,7 +144,7 @@ official pages do not say.
 | Client JA4, JA3 | yes | | | |
 
 Not in wirust yet: a native app, scripting, gRPC and protobuf views, HTTP/3, system proxy
-setup, an upstream proxy. See [docs/roadmap.md](docs/roadmap.md).
+setup. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Security
 
@@ -183,6 +184,8 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 | `--config-dir DIR` | platform config dir | where the CA is kept |
 | `--allow-remote` | | allow a non-loopback `--listen` address (dangerous) |
 | `--upstream-insecure` | | do not verify server certificates (dangerous) |
+| `--upstream-proxy URL` | | reach servers through an `http://`, `socks5://` or `socks5h://` proxy, optional `USER:PASS@` |
+| `--upstream-bypass LIST` | | hosts, `*.domains`, IPs and CIDRs that skip the upstream proxy (repeatable) |
 | `--android-cleanup` | | on exit, clear the adb device's proxy |
 
 Commands: `connect`, `android setup|reset`, `ca path|show|install-help`, `export --har`,

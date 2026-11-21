@@ -36,6 +36,7 @@ mod rules_api;
 pub mod session;
 pub mod throttle;
 mod upstream;
+pub mod upstream_proxy;
 pub mod ws;
 mod ws_api;
 

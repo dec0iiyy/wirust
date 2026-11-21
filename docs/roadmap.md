@@ -2,7 +2,6 @@
 
 Not built yet, in rough priority order. Everything else described in `docs/` is built.
 
-1. Upstream proxy: reach servers through a corporate HTTP proxy with CONNECT. Direct only today.
 2. System proxy auto-setup (macOS network services, Windows, GNOME) with clean undo.
 3. Replay, compose and passthrough in the web UI; today they are API and CLI only.
 4. WebSocket: `permessage-deflate` decoding instead of stripping, a `ws:` search field,

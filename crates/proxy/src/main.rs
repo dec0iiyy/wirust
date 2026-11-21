@@ -20,6 +20,7 @@ use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
 use wirust::rules::Rules;
 use wirust::session;
+use wirust::upstream_proxy::{Bypass, Kind as UpstreamProxyKind, UpstreamProxy};
 use wirust::ws::{self, DEFAULT_WS_BODY_LIMIT, DEFAULT_WS_MAX_MESSAGES, WsLimits};
 use wirust::{Config, DEFAULT_BODY_LIMIT, MAGIC_HOST, NAME, Proxy, RemoteAccess, UpstreamTls};
 use wirust::{mobile, qr};
@@ -84,6 +85,8 @@ struct RunArgs {
     replay: ReplayArgs,
     ws: WsLimits,
     ws_log: WsLog,
+    upstream_proxy: Option<UpstreamProxy>,
+    upstream_bypass: Bypass,
 }
 
 /// Flags of `replay`.
@@ -126,6 +129,7 @@ fn usage() -> String {
 
 Usage:
   {NAME} [--listen ADDR] [--json] [--body-limit BYTES] [--upstream-insecure]
+         [--upstream-proxy URL] [--upstream-bypass LIST]
          [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
          [--block-host HOST]... [--rules FILE] [--session FILE]
@@ -159,6 +163,10 @@ Options:
   --json                print one JSON object per line instead of text
   --body-limit BYTES    body bytes kept per request and response (default {DEFAULT_BODY_LIMIT})
   --upstream-insecure   do not verify server certificates (dangerous)
+  --upstream-proxy URL  send every outbound connection through another proxy:
+                        http://, socks5:// or socks5h:// (remote DNS), optional USER:PASS@
+  --upstream-bypass LIST  comma-separated hosts, *.domains, IPs and CIDRs that go direct
+                        (repeatable); loopback and localhost always go direct
   --allow-remote        allow a non-loopback --listen address (dangerous)
   --config-dir DIR      where the CA is kept (default: the platform config dir)
   --max-flows N         flows kept in memory for the UI and API (default {DEFAULT_MAX_FLOWS})
@@ -413,6 +421,8 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         replay: ReplayArgs::default(),
         ws: WsLimits::default(),
         ws_log: WsLog::Off,
+        upstream_proxy: None,
+        upstream_bypass: Bypass::default(),
     };
     let mut mobile = MobileArgs::default();
     let mut words = Vec::new();
@@ -439,6 +449,13 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                     .context("--body-limit takes a byte count")?;
             }
             "--upstream-insecure" => run.upstream_insecure = true,
+            "--upstream-proxy" => {
+                run.upstream_proxy = Some(value(arg)?.parse().context("--upstream-proxy")?);
+            }
+            "--upstream-bypass" => run
+                .upstream_bypass
+                .extend_from(&value(arg)?)
+                .context("--upstream-bypass")?,
             "--allow-remote" => run.allow_remote = true,
             "--config-dir" => run.config_dir = Some(PathBuf::from(value(arg)?)),
             "--max-flows" => {
@@ -788,6 +805,8 @@ fn run(
         pairing: pairing.as_ref().map(|(pairing, _)| pairing.clone()),
         passthrough: passthrough(&args)?,
         ws: args.ws,
+        upstream_proxy: args.upstream_proxy.take(),
+        upstream_bypass: std::mem::take(&mut args.upstream_bypass),
         ..Config::new(config_dir(args.config_dir)?)
     };
     let rules = register_interceptors(
@@ -805,6 +824,9 @@ fn run(
         args.allow_remote,
         args.upstream_insecure,
     );
+    if let Some(proxy) = &config.upstream_proxy {
+        announce_upstream_proxy(proxy);
+    }
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
     runtime.block_on(async {
         let mut proxy = Proxy::bind(config).await?;
@@ -880,6 +902,18 @@ fn warn_about_risky_options(
         eprintln!(
             "WARNING: --upstream-insecure: server certificates are NOT verified; anyone on the \
              path to a server can read and change the traffic."
+        );
+    }
+}
+
+/// Prints the upstream proxy (password redacted) and warns once when its credentials would
+/// cross the network in clear text.
+fn announce_upstream_proxy(proxy: &UpstreamProxy) {
+    eprintln!("{NAME}: outbound connections go through the upstream proxy {proxy}");
+    if proxy.kind() == UpstreamProxyKind::Http && proxy.has_credentials() && !proxy.is_loopback() {
+        eprintln!(
+            "WARNING: --upstream-proxy: the credentials go to {proxy} over plain http://; anyone \
+             on the path can read them."
         );
     }
 }

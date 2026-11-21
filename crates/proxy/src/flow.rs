@@ -116,6 +116,8 @@ pub enum Flag {
     /// The server answered the WebSocket upgrade with an extension anyway: messages are
     /// recorded as raw (likely compressed) payloads.
     WsCompressed,
+    /// The server connection went through the upstream proxy (`--upstream-proxy`).
+    UpstreamProxy,
     /// The rule with this name fired (`rule:<name>`).
     Rule(String),
 }
@@ -132,6 +134,7 @@ impl fmt::Display for Flag {
             Self::Replay => "replay",
             Self::WsExtensionsStripped => "ws_extensions_stripped",
             Self::WsCompressed => "ws_compressed",
+            Self::UpstreamProxy => "upstream_proxy",
             Self::Rule(name) => return write!(f, "rule:{name}"),
         })
     }
@@ -158,6 +161,7 @@ impl<'de> Deserialize<'de> for Flag {
             "replay" => Self::Replay,
             "ws_extensions_stripped" => Self::WsExtensionsStripped,
             "ws_compressed" => Self::WsCompressed,
+            "upstream_proxy" => Self::UpstreamProxy,
             other => match other.strip_prefix("rule:") {
                 Some(name) => Self::Rule(name.to_owned()),
                 None => {
@@ -173,6 +177,7 @@ impl<'de> Deserialize<'de> for Flag {
                             "replay",
                             "ws_extensions_stripped",
                             "ws_compressed",
+                            "upstream_proxy",
                             "rule:<name>",
                         ],
                     ));

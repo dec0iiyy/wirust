@@ -14,6 +14,7 @@ built in parallel without editing the same functions.
 | `hello.rs` | reads and replays the raw ClientHello (`peek`, `Prefixed`) |
 | `ca.rs`, `certs.rs` | the local CA, per-host leaf certificates and their cache |
 | `upstream.rs` | server connections (TLS, ALPN, timings) |
+| `upstream_proxy.rs` | `--upstream-proxy`: URL and redaction, bypass list, HTTP CONNECT and SOCKS5 clients |
 | `body.rs` | `Tee` (bounded body copy for the log), `buffer`/`Prepend` (bounded buffering) |
 | `flow.rs` | the record types (`Event`, `Exchange`, `TlsFailure`, `Tunnel`, `Flag`) and the text log line |
 | `events.rs` | `FlowEvent`, `Bus` (broadcast), `Flow` (record plus `schema_version`), `FlowStore` (ring buffer), `Filter` |

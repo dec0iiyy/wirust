@@ -6,6 +6,7 @@
 - [interchange.md](interchange.md): session files, HAR export and import, the search syntax, cURL copies.
 - [replay.md](replay.md): sending a captured request again, changed or composed from scratch.
 - [passthrough.md](passthrough.md): relaying chosen hosts undecrypted, with their TLS fingerprint still recorded.
+- [upstream-proxy.md](upstream-proxy.md): chaining to a corporate HTTP or SOCKS5 proxy, the bypass list, credentials.
 - [websocket.md](websocket.md): WebSocket message capture and its limits.
 - [mobile.md](mobile.md): connecting Android and iOS devices, and what they will not let you see.
 - [architecture.md](architecture.md): module map, one exchange step by step, the flow schema, extension seams.
