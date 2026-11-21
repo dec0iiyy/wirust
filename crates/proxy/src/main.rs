@@ -56,7 +56,8 @@ enum Command {
         config_dir: Option<PathBuf>,
         args: ReplayArgs,
     },
-    Help,
+    /// `--help`, with the command words given before or after it (none: the main help).
+    Help(Vec<String>),
     Version,
 }
 
@@ -128,6 +129,7 @@ Usage:
          [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
          [--block-host HOST]... [--rules FILE] [--session FILE]
+         [--passthrough PATTERN]... [--decrypt-only PATTERN]...
          [--ws-body-limit BYTES] [--ws-max-messages N] [--ws-log]
          [--android-cleanup [--serial S]]
   {NAME} connect [--port P] [--lan-ip IP] [--allow-client IP|CIDR]... [run options]
@@ -138,6 +140,7 @@ Usage:
   {NAME} view --session FILE [--filter QUERY]
   {NAME} replay --session FILE --id N [--set-header 'N: V']... [--method M] [--url U]
          [--via http://127.0.0.1:8080] [--config-dir DIR]
+  {NAME} COMMAND --help      the options of one command
 
 Commands:
   connect               listen on this computer's LAN address, show a QR code of the setup
@@ -149,6 +152,9 @@ Commands:
                         as an ordinary client, and print the status line; see docs/replay.md
 
 Options:
+  -h, --help            print this help; after a command, such as `{NAME} ca --help`, the
+                        help of that command
+  -V, --version         print the version
   --listen ADDR         address to listen on (default 127.0.0.1:8080)
   --json                print one JSON object per line instead of text
   --body-limit BYTES    body bytes kept per request and response (default {DEFAULT_BODY_LIMIT})
@@ -193,6 +199,193 @@ Requests to http://{MAGIC_HOST}/ through the proxy get a page with the CA downlo
     )
 }
 
+/// The help of one command (`{NAME} COMMAND --help`); `None` for words that name no command,
+/// which get the main help. A parent word (`android`, `ca`) describes its sub-commands.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one page per command; splitting it would only move the pages"
+)]
+fn command_help(words: &[&str]) -> Option<String> {
+    let page = match words {
+        ["connect"] => format!(
+            "{NAME} connect: set up a phone through this computer's LAN address
+
+Usage:
+  {NAME} connect [--port P] [--lan-ip IP] [--allow-client IP|CIDR]... [run options]
+
+Listens on this computer's LAN address, shows a QR code of the setup page and asks
+before each phone may use the proxy (see docs/mobile.md).
+
+Options:
+  --port P              proxy port (default {DEFAULT_PORT})
+  --lan-ip IP           the address to listen on, instead of the detected one
+  --allow-client NET    pre-approve this IP or CIDR (repeatable)
+
+The options of a plain run work too, such as --ui, --rules and --passthrough; --listen
+is replaced by --port and --lan-ip. See `{NAME} --help`.
+"
+        ),
+        ["android"] => format!(
+            "{NAME} android: point an Android device at the proxy over adb
+
+Usage:
+  {NAME} android setup [--serial S] [--port P] [--config-dir DIR]
+  {NAME} android reset [--serial S] [--port P]
+
+  setup   reverse the port, set the device's proxy to 127.0.0.1:P and copy the CA to
+          its Download folder
+  reset   clear the device's proxy and the port reversal
+
+See `{NAME} android setup --help` and docs/mobile.md.
+"
+        ),
+        ["android", "setup"] => format!(
+            "{NAME} android setup: point an Android device at the proxy over adb
+
+Usage:
+  {NAME} android setup [--serial S] [--port P] [--config-dir DIR]
+
+Reverses the port over adb, sets the device's proxy to 127.0.0.1:P and copies the CA to
+the device's Download folder. While the proxy is not running the device has no working
+HTTP proxy; `{NAME} android reset` undoes it. See docs/mobile.md.
+
+Options:
+  --serial S            the adb device to use when several are connected
+  --port P              proxy port (default {DEFAULT_PORT})
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["android", "reset"] => format!(
+            "{NAME} android reset: clear the proxy setting of an Android device
+
+Usage:
+  {NAME} android reset [--serial S] [--port P]
+
+Clears the device's proxy and the reversal of the proxy port, over adb.
+
+Options:
+  --serial S            the adb device to use when several are connected
+  --port P              proxy port whose reversal is removed (default {DEFAULT_PORT})
+"
+        ),
+        ["ca"] => format!(
+            "{NAME} ca: the local certificate authority
+
+Usage:
+  {NAME} ca path|show|install-help [--config-dir DIR]
+
+  path           print where the CA certificate file is
+  show           print the CA certificate (PEM)
+  install-help   how to trust the CA on macOS, Linux and Windows
+
+The CA is created on first use. See `{NAME} ca path --help`.
+"
+        ),
+        ["ca", "path"] => format!(
+            "{NAME} ca path: print where the CA certificate file is
+
+Usage:
+  {NAME} ca path [--config-dir DIR]
+
+Creates the CA when there is none yet.
+
+Options:
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["ca", "show"] => format!(
+            "{NAME} ca show: print the CA certificate
+
+Usage:
+  {NAME} ca show [--config-dir DIR]
+
+Prints the certificate as PEM; the private key is never printed. Creates the CA when
+there is none yet.
+
+Options:
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["ca", "install-help"] => format!(
+            "{NAME} ca install-help: how to trust the CA
+
+Usage:
+  {NAME} ca install-help [--config-dir DIR]
+
+Prints the commands that trust the CA on macOS, Linux and Windows, and how to pass it to
+single tools. Creates the CA when there is none yet.
+
+Options:
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["export"] => format!(
+            "{NAME} export: write flows as a HAR file
+
+Usage:
+  {NAME} export --har OUT.har [--session FILE] [--filter QUERY]
+
+Reads a session file, or JSON Lines on stdin without --session, and writes the matching
+flows as HAR 1.2 (see docs/interchange.md).
+
+Options:
+  --har FILE            the HAR file to write (- for stdout)
+  --session FILE        the session file to read (default: JSON Lines on stdin)
+  --filter QUERY        keep only flows matching this search, such as 'host:example.com status:5xx'
+"
+        ),
+        ["import"] => format!(
+            "{NAME} import: turn a HAR file into a session file
+
+Usage:
+  {NAME} import --har IN.har --session OUT.jsonl
+
+Writes the entries of a HAR file as JSON Lines flows, which `{NAME} view`, `{NAME} export`
+and `{NAME} replay` read (see docs/interchange.md).
+
+Options:
+  --har FILE            the HAR file to read
+  --session FILE        the session file to write
+"
+        ),
+        ["view"] => format!(
+            "{NAME} view: print the flows of a session file
+
+Usage:
+  {NAME} view --session FILE [--filter QUERY]
+
+Prints one line per flow, as the proxy prints them while it runs.
+
+Options:
+  --session FILE        the session file to read
+  --filter QUERY        keep only flows matching this search, such as 'host:example.com status:5xx'
+"
+        ),
+        ["replay"] => format!(
+            "{NAME} replay: send a recorded flow again
+
+Usage:
+  {NAME} replay --session FILE --id N [--set-header 'N: V']... [--method M] [--url U]
+         [--via http://127.0.0.1:{DEFAULT_PORT}] [--config-dir DIR]
+
+Sends flow N of a session file through a running proxy, as an ordinary client, and prints
+the status line (see docs/replay.md).
+
+Options:
+  --session FILE        the session file to read
+  --id N                the flow id in the session file
+  --set-header 'N: V'   set this header (repeatable)
+  --method M            send with this method
+  --url U               send to this path or absolute http(s) URL
+  --via URL             the proxy to go through (default http://127.0.0.1:{DEFAULT_PORT})
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        _ => return None,
+    };
+    Some(page)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one match arm per command-line flag; splitting it would only move the arms"
@@ -223,6 +416,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
     };
     let mut mobile = MobileArgs::default();
     let mut words = Vec::new();
+    let mut help = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
@@ -231,7 +425,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                 .with_context(|| format!("{flag} needs a value"))
         };
         match arg.as_str() {
-            "-h" | "--help" => return Ok(Command::Help),
+            "-h" | "--help" => help = true,
             "-V" | "--version" => return Ok(Command::Version),
             "--listen" => {
                 run.listen = value(arg)?
@@ -321,6 +515,9 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             word => words.push(word.to_owned()),
         }
     }
+    if help {
+        return Ok(Command::Help(words));
+    }
     let dir = run.config_dir.clone();
     match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => Ok(Command::Run(run, mobile)),
@@ -403,7 +600,10 @@ fn main() -> ExitCode {
 
 fn execute(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Help => print!("{}", usage()),
+        Command::Help(words) => {
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            print!("{}", command_help(&words).unwrap_or_else(usage));
+        }
         Command::Version => println!("{NAME} {}", env!("CARGO_PKG_VERSION")),
         Command::CaPath(dir) => {
             let dir = config_dir(dir)?;
@@ -837,5 +1037,142 @@ mod tests {
         assert!(parse(&args("connect --allow-client phone")).is_err());
         assert!(parse(&args("android nope")).is_err());
         Ok(())
+    }
+
+    /// The text of `fn parse`, the one place that knows the flags and commands.
+    fn parser_source() -> &'static str {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE.find("\nfn parse(").expect("main.rs has fn parse");
+        let end = SOURCE[start..]
+            .find("\nfn config_dir")
+            .expect("fn config_dir follows fn parse");
+        &SOURCE[start..start + end]
+    }
+
+    /// The string literals before the `=>` of an arm line.
+    fn arm_literals(line: &str) -> Vec<&str> {
+        let pattern = line.split("=>").next().unwrap_or_default();
+        pattern.split('"').skip(1).step_by(2).collect()
+    }
+
+    /// Every flag the parser accepts, read from its match arms.
+    fn parser_flags() -> Vec<&'static str> {
+        let flags: Vec<&str> = (parser_source().lines())
+            .map(str::trim)
+            .filter(|line| line.starts_with("\"-") && line.contains("=>"))
+            .flat_map(arm_literals)
+            .collect();
+        assert!(
+            flags.len() > 30,
+            "found too few flags in the parser: {flags:?}"
+        );
+        flags
+    }
+
+    /// Every command the parser accepts, such as `["android", "setup"]`.
+    fn parser_commands() -> Vec<Vec<&'static str>> {
+        let commands: Vec<Vec<&str>> = (parser_source().lines())
+            .map(str::trim)
+            .filter(|line| line.starts_with('[') && line.contains("=>"))
+            .map(arm_literals)
+            .filter(|words| !words.is_empty())
+            .collect();
+        assert!(commands.len() >= 9, "found too few commands: {commands:?}");
+        commands
+    }
+
+    /// The `--flag` words in `text`.
+    fn flags_in(text: &str) -> Vec<&str> {
+        text.match_indices("--")
+            .filter(|(at, _)| !text[..*at].ends_with(|c: char| c.is_ascii_alphanumeric()))
+            .map(|(at, _)| {
+                let rest = &text[at..];
+                let len = rest
+                    .find(|c: char| !(c == '-' || c.is_ascii_lowercase()))
+                    .unwrap_or(rest.len());
+                &rest[..len]
+            })
+            .filter(|flag| flag.len() > 2)
+            .collect()
+    }
+
+    #[test]
+    fn the_help_lists_every_flag_the_parser_accepts() {
+        let help = usage();
+        let (synopsis, rest) = help
+            .split_once("\nCommands:")
+            .expect("usage has a Commands section");
+        let (_, options) = rest
+            .split_once("\nOptions:")
+            .expect("usage has an Options section");
+        for flag in parser_flags() {
+            assert!(options.contains(flag), "Options lacks {flag}");
+            // The help flags have a line in Options only.
+            if !matches!(flag, "-h" | "--help" | "-V" | "--version") {
+                assert!(synopsis.contains(flag), "the Usage lines lack {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_names_no_flag_the_parser_refuses() {
+        let known = parser_flags();
+        let mut texts = vec![usage()];
+        texts.extend(
+            parser_commands()
+                .iter()
+                .filter_map(|words| command_help(words)),
+        );
+        for text in &texts {
+            for flag in flags_in(text) {
+                assert!(
+                    known.contains(&flag),
+                    "help mentions {flag}, which is not parsed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_command_has_its_own_help_page() -> anyhow::Result<()> {
+        let mut commands = parser_commands();
+        // The parents of the two-word commands have a page of their own.
+        commands.extend([vec!["android"], vec!["ca"]]);
+        for words in commands {
+            let page = command_help(&words)
+                .with_context(|| format!("no help page for {}", words.join(" ")))?;
+            assert_ne!(page, usage(), "{words:?} shows the main help");
+            assert!(
+                page.starts_with(&format!("{NAME} {}", words.join(" "))),
+                "{words:?}: {page}"
+            );
+            for position in [0, words.len()] {
+                let mut line = words.clone();
+                line.insert(position, "--help");
+                let Command::Help(given) = parse(&args(&line.join(" ")))? else {
+                    panic!("{line:?} must ask for help");
+                };
+                assert_eq!(given, words, "{line:?}");
+            }
+        }
+        assert!(command_help(&["nope"]).is_none());
+        let Command::Help(given) = parse(&args("--help"))? else {
+            panic!("--help must ask for help");
+        };
+        assert!(given.is_empty(), "{given:?}");
+        assert!(matches!(parse(&args("-h"))?, Command::Help(_)));
+        assert!(matches!(parse(&args("-V"))?, Command::Version));
+        Ok(())
+    }
+
+    #[test]
+    fn the_plain_run_usage_names_the_passthrough_flags() {
+        let help = usage();
+        let (run_usage, _) = help
+            .split_once(&format!("\n  {NAME} connect"))
+            .expect("the connect usage line follows the plain run");
+        for flag in ["--passthrough PATTERN", "--decrypt-only PATTERN"] {
+            assert!(run_usage.contains(flag), "{flag} missing from: {run_usage}");
+        }
     }
 }
