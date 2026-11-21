@@ -24,6 +24,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+# Already built for rcgen and rustls; used directly only for the SHA-1 thumbprint that
+# `certutil -delstore` and `security delete-certificate` identify a certificate by.
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.23.1"
 bytes = "1.12.2"
 dirs = "7.0.0"

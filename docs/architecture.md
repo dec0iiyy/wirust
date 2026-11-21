@@ -22,6 +22,7 @@ built in parallel without editing the same functions.
 | `magic.rs` | answers `http(s)://wirust.test/` and origin-form requests to the proxy port: setup page, `/ca.pem`, `/ca.crt`, `/ca.mobileconfig`, `/mobile-help`, `/pairing-status`, `/setup.js`, `/setup.css` |
 | `pairing.rs` | `Pairing`: which client IPs may use a LAN proxy (loopback, `--allow-client`, approvals); `Pairing::screen` runs in `serve_client` before each request |
 | `mobile.rs` | the setup page per platform, the `connect` banner, the approval console and its hints, LAN address detection |
+| `sysproxy.rs`, `trust.rs`, `oscmd.rs` | `system-proxy` and `--system-proxy` with the saved-state file; `ca install`/`uninstall`/`status`; the `CommandRunner` trait both run OS tools through |
 | `qr.rs`, `mobileconfig.rs`, `adb.rs` | terminal QR code; iOS profile with the CA; `adb` argument builders for `android setup`/`reset` |
 | `rules.rs`, `rules_api.rs` | the rules engine (`--rules`, three chain stages) and its API routes; `docs/rules.md` |
 | `replay.rs`, `replay_api.rs` | replay and compose (`Replayer`, limits, `ReplayTag` read by `forward`), the `replay` CLI, routes for replay, compose and passthrough; `docs/replay.md` |

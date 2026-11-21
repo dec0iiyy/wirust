@@ -185,7 +185,7 @@ fn ca_params(now: Utc) -> CertificateParams {
     params
 }
 
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -198,7 +198,7 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("creating {}", dir.display()))
 }
 
-fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

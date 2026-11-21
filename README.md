@@ -58,6 +58,7 @@ directory.
 wirust ca path           # where the certificate is
 wirust ca show           # the certificate in PEM
 wirust ca install-help   # how to trust it on macOS, Linux and Windows
+wirust ca install        # trust it for your user only (asks first); ca uninstall removes it
 ```
 
 **Send traffic through it.**
@@ -67,8 +68,9 @@ curl -x http://127.0.0.1:8080 --cacert "$(wirust ca path)" https://example.com/
 export HTTPS_PROXY=http://127.0.0.1:8080 HTTP_PROXY=http://127.0.0.1:8080
 ```
 
-Browsers: set the HTTP and HTTPS proxy to `127.0.0.1:8080` in the system or browser settings
-after trusting the CA. wirust does not change system proxy settings itself.
+Browsers: run `wirust --system-proxy` to point the system proxy (macOS, Windows, GNOME) at
+wirust while it runs and restore the old settings on exit, or set the HTTP and HTTPS proxy to
+`127.0.0.1:8080` by hand. See [docs/desktop.md](docs/desktop.md).
 
 Without `--ui`, it prints one line per exchange (`--json` for JSON Lines):
 
@@ -127,11 +129,11 @@ official pages do not say.
 | Scripting | no | JavaScript | | Python |
 | gRPC, protobuf views | no | protobuf | protobuf | yes |
 | HTTP/3 | no | | | yes |
-| Sets the system proxy | no | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
+| Sets the system proxy | yes (macOS, Windows, GNOME) | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
 | Client JA4, JA3 | yes | | | |
 
-Not in wirust yet: a native app, scripting, gRPC and protobuf views, HTTP/3, system proxy
-setup, an upstream proxy. See [docs/roadmap.md](docs/roadmap.md).
+Not in wirust yet: a native app, scripting, gRPC and protobuf views, HTTP/3, an upstream
+proxy. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Security
 
