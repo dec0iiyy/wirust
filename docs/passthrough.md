@@ -50,6 +50,9 @@ The ClientHello is read before the decision, so the client's SNI, offered ALPN, 
 the matching known client are recorded exactly as for intercepted tunnels. Bytes in both
 directions, the duration and a connection error are recorded too. `reason`, `tls` and
 `duration_ms` are optional fields, so `schema_version` stays 1; non-TLS tunnels omit them.
+The web UI reads the same `tls` object: the row's Client column shows `known_client`, or the
+JA4 when none matches, and the Client TLS tab shows the SNI, the offered ALPN and both
+fingerprints (`GET /api/v1/flows/{id}` returns it).
 
 ## What is not
 
