@@ -1,6 +1,6 @@
 //! `.proto` schemas for the gRPC view: `--proto` files and directories compiled with `protox`
 //! (no `protoc` binary) into a descriptor pool, reloaded when they change, and a decoder that
-//! turns a message into the same tree as the schema-less [`protobuf`](crate::protobuf)
+//! turns a message into the same tree as the schema-less [`protobuf`]
 //! decoder, with field names, declared types and enum names added.
 //!
 //! Schema files are local, but reading them is still bounded: at most [`MAX_SCHEMA_BYTES`]

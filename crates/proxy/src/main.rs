@@ -178,6 +178,10 @@ impl MobileArgs {
 /// The proxy port `connect` and `android` use unless `--port` says otherwise.
 const DEFAULT_PORT: u16 = 8080;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one help text; splitting it would only move the lines"
+)]
 fn usage() -> String {
     format!(
         "{NAME} {version}: an HTTPS debugging proxy
@@ -1254,6 +1258,25 @@ fn register_interceptors(
     Ok(rules)
 }
 
+/// Starts the phone console of `connect` (the setup banner, then the approval prompts);
+/// without pairing there is none.
+fn start_console(
+    pairing: Option<(Pairing, UnboundedReceiver<Notice>)>,
+    proxy: &Proxy,
+    local: SocketAddr,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some((pairing, notices)) = pairing else {
+        return Ok(None);
+    };
+    let url = format!("http://{local}/");
+    eprintln!("{}", mobile::banner(local, &qr::terminal(&url)?, &pairing));
+    let events = proxy.subscribe();
+    let input = mobile::stdin_lines();
+    Ok(Some(tokio::spawn(mobile::console(
+        pairing, notices, events, input, local,
+    ))))
+}
+
 fn run(
     mut args: RunArgs,
     mobile: &MobileArgs,
@@ -1326,18 +1349,7 @@ fn run(
         let local = proxy.local_addr()?;
         // Dropped on every way out of this block, so an early error also restores it.
         let system_proxy = start_system_proxy(args.system_proxy, &dir, local)?;
-        let console = match pairing {
-            Some((pairing, notices)) => {
-                let url = format!("http://{local}/");
-                eprintln!("{}", mobile::banner(local, &qr::terminal(&url)?, &pairing));
-                let events = proxy.subscribe();
-                let input = mobile::stdin_lines();
-                Some(tokio::spawn(mobile::console(
-                    pairing, notices, events, input, local,
-                )))
-            }
-            None => None,
-        };
+        let console = start_console(pairing, &proxy, local)?;
         if let Some(path) = &args.session {
             start_session(path, proxy.subscribe())?;
         }
