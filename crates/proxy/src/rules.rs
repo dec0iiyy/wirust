@@ -18,7 +18,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::Flag;
-use crate::intercept::{Action, Interceptor, Pauses, Phase, RequestCtx, ResponseCtx, plain};
+use crate::intercept::{
+    Action, Interceptor, Paused, Pauses, Phase, RequestCtx, ResponseCtx, plain,
+};
 use crate::throttle::Throttle;
 
 /// Largest compiled program of one regex, in bytes; bigger patterns are a rule error.
@@ -364,10 +366,19 @@ impl RuleSet {
     }
 
     fn from_rules(rules: Vec<Rule>) -> Self {
+        // Body rewrites need the body; so do breakpoints, so the pause shows it for editing.
         fn wants(rules: &[Rule], phase: RulePhase) -> bool {
             rules
                 .iter()
-                .any(|r| r.config.enabled && matches!(r.action, Act::Body(p, _) if p == phase))
+                .filter(|r| r.config.enabled)
+                .any(|r| match r.action {
+                    Act::Body(p, _) => p == phase,
+                    Act::Breakpoint { request, response } => match phase {
+                        RulePhase::Request => request,
+                        RulePhase::Response => response,
+                    },
+                    _ => false,
+                })
         }
         let needs_request_body = wants(&rules, RulePhase::Request);
         let needs_response_body = wants(&rules, RulePhase::Response);
@@ -1337,7 +1348,8 @@ impl Interceptor for BreakpointStage {
             return Action::Continue;
         }
         request.flags.extend(hits);
-        Action::Pause(self.1.pause(request.id, Phase::Request))
+        let detail = Paused::of_request(request);
+        Action::Pause(self.1.pause_with(request.id, Phase::Request, detail))
     }
 
     fn on_response(&self, request: &RequestCtx, response: &mut ResponseCtx) -> Action {
@@ -1354,7 +1366,8 @@ impl Interceptor for BreakpointStage {
             return Action::Continue;
         }
         response.flags.extend(hits);
-        Action::Pause(self.1.pause(request.id, Phase::Response))
+        let detail = Paused::of_response(request, response);
+        Action::Pause(self.1.pause_with(request.id, Phase::Response, detail))
     }
 }
 

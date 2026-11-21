@@ -570,3 +570,163 @@ async fn the_rules_api_lists_toggles_and_replaces_atomically() -> TestResult {
     assert_eq!(rules.report().rules[0].name, "t");
     Ok(())
 }
+
+type Pending = tokio::task::JoinHandle<anyhow::Result<(StatusCode, Bytes)>>;
+
+/// Sends `body` to `path` through `running` in the background and waits for its pause.
+async fn send_and_pause(
+    running: &mut Running,
+    port: u16,
+    path: &'static str,
+    body: &'static [u8],
+) -> anyhow::Result<(u64, Pending)> {
+    let client = Running {
+        addr: running.addr,
+        ca_pem: running.ca_pem.clone(),
+        events: wirust::events::Bus::new().subscribe(),
+        dir: temp_dir(),
+    };
+    let pending =
+        tokio::spawn(async move { request(&client, port, b"http/1.1", path, body).await });
+    Ok((next_pause(running).await?, pending))
+}
+
+async fn next_pause(running: &mut Running) -> anyhow::Result<u64> {
+    loop {
+        if let FlowEvent::Paused(paused) = next_bus_event(&mut running.events).await? {
+            return Ok(paused.pause_id);
+        }
+    }
+}
+
+fn header_pairs(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value.as_array().cloned().unwrap_or_default()
+}
+
+const BREAK_ECHO: &str = r#"
+[[rules]]
+name = "stop"
+match = { path = "/echo" }
+action = { type = "breakpoint", request = true, response = true }
+"#;
+
+#[tokio::test]
+async fn a_paused_exchange_shows_heads_and_bodies_and_takes_body_edits() -> TestResult {
+    let rules = rules_from(BREAK_ECHO)?;
+    let (mut running, port, addr, token) = start_ui(&rules).await?;
+    let (id, pending) = send_and_pause(&mut running, port, "/echo", b"hello paused").await?;
+    let path = format!("/api/v1/pauses/{id}");
+    let (status, detail) = api(addr, &token, Method::GET, &path, "").await?;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["phase"], "request");
+    assert_eq!(detail["request"]["method"], "POST");
+    assert_eq!(
+        detail["request"]["url"],
+        format!("https://localhost:{port}/echo")
+    );
+    let headers = header_pairs(&detail["request"]["headers"]);
+    assert!(
+        headers.contains(&serde_json::json!(["x-req", "abc"])),
+        "{headers:?}"
+    );
+    let body = &detail["request"]["body"];
+    assert_eq!(
+        body,
+        &serde_json::json!({"state": "whole", "size": 12, "binary": false,
+                            "truncated": false, "text": "hello paused"})
+    );
+    assert!(detail["response"].is_null());
+
+    let edit = format!("{path}/edit");
+    let (status, _) = api(addr, &token, Method::POST, &edit, r#"{"body":"edited"}"#).await?;
+    assert_eq!(status, StatusCode::OK);
+
+    // The response half pauses next and shows what the server answered.
+    let id = next_pause(&mut running).await?;
+    let path = format!("/api/v1/pauses/{id}");
+    let (status, detail) = api(addr, &token, Method::GET, &path, "").await?;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["phase"], "response");
+    assert_eq!(detail["response"]["status"], 200);
+    let headers = header_pairs(&detail["response"]["headers"]);
+    assert!(
+        headers.contains(&serde_json::json!(["x-test", "1"])),
+        "{headers:?}"
+    );
+    assert_eq!(detail["response"]["body"]["text"], "edited");
+    let change = r#"{"status":201,"body":"from the breakpoint"}"#;
+    let edit = format!("{path}/edit");
+    let (status, _) = api(addr, &token, Method::POST, &edit, change).await?;
+    assert_eq!(status, StatusCode::OK);
+    let answer = pending.await??;
+    assert_eq!(
+        answer,
+        (
+            StatusCode::CREATED,
+            Bytes::from_static(b"from the breakpoint")
+        )
+    );
+
+    let (status, _) = api(addr, &token, Method::GET, &path, "").await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a resolved pause is gone");
+    let (status, _) = api(addr, &token, Method::DELETE, &path, "").await?;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    Ok(())
+}
+
+const BREAK_ECHO_RESPONSE: &str = r#"
+[[rules]]
+name = "stop"
+match = { path = "/echo" }
+action = { type = "breakpoint", request = false, response = true }
+"#;
+
+#[tokio::test]
+async fn a_binary_paused_body_comes_as_a_base64_preview() -> TestResult {
+    let rules = rules_from(BREAK_ECHO_RESPONSE)?;
+    let (mut running, port, addr, token) = start_ui(&rules).await?;
+    let (id, pending) = send_and_pause(&mut running, port, "/echo", b"\xff\x00\xfebin").await?;
+    let path = format!("/api/v1/pauses/{id}");
+    let (_, detail) = api(addr, &token, Method::GET, &path, "").await?;
+    assert_eq!(detail["phase"], "response");
+    assert_eq!(
+        detail["response"]["body"],
+        serde_json::json!({"state": "whole", "size": 6, "binary": true,
+                           "truncated": false, "base64": "/wD+Ymlu"})
+    );
+    let (status, _) = api(addr, &token, Method::POST, &format!("{path}/resume"), "").await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = pending.await??;
+    assert_eq!(body, Bytes::from_static(b"\xff\x00\xfebin"));
+    Ok(())
+}
+
+const BREAK_ECHO_REQUEST: &str = r#"
+[[rules]]
+name = "stop"
+match = { path = "/echo" }
+action = { type = "breakpoint" }
+"#;
+
+/// Larger than the body limit `start_ui` sets (1024 bytes).
+static LARGE: [u8; 3000] = [b'z'; 3000];
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_reported_and_passes_unchanged() -> TestResult {
+    let rules = rules_from(BREAK_ECHO_REQUEST)?;
+    let (mut running, port, addr, token) = start_ui(&rules).await?;
+    let (id, pending) = send_and_pause(&mut running, port, "/echo", &LARGE).await?;
+    let path = format!("/api/v1/pauses/{id}");
+    let (_, detail) = api(addr, &token, Method::GET, &path, "").await?;
+    assert_eq!(
+        detail["request"]["body"],
+        serde_json::json!({"state": "too_large"})
+    );
+    // A header edit leaves the streamed body as it was.
+    let edit = r#"{"set_headers":{"x-added":"1"}}"#;
+    let (status, _) = api(addr, &token, Method::POST, &format!("{path}/edit"), edit).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = pending.await??;
+    assert_eq!(body, Bytes::from_static(&LARGE));
+    Ok(())
+}

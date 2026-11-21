@@ -8,21 +8,29 @@
 //! | `GET /api/v1/rules` | [`Report`](crate::rules::Report): rules, watched file, last load error |
 //! | `PUT /api/v1/rules` | replaces the whole set from `{"rules": [...]}`; `400` with the errors |
 //! | `POST /api/v1/rules/{name}/toggle` | `{"name", "enabled"}`; `404` for no such rule |
+//! | `GET /api/v1/pauses/{id}` | the paused request (and response): head and body preview |
 //! | `POST /api/v1/pauses/{id}/edit` | resolves the pause with an [`Edit`]; `400` leaves it pending |
 
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
 use bytes::Bytes;
-use http::{HeaderName, HeaderValue, Method, StatusCode, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::intercept::{Edit, Pauses, Phase, Resolution, Server};
+use crate::intercept::{Edit, PausedBody, Pauses, Phase, Resolution, Server};
 use crate::rules::{Rules, RulesFile};
 
 /// Largest request body the control plane reads (a rule set or an edit), in bytes.
 pub(crate) const MAX_BODY: usize = 1024 * 1024;
+
+/// Most bytes of a paused text body `GET /api/v1/pauses/{id}` returns; a longer one is
+/// cut and marked `truncated`.
+pub(crate) const TEXT_PREVIEW: usize = 256 * 1024;
+
+/// Most bytes of a paused binary body returned (base64) for a hex preview.
+pub(crate) const BINARY_PREVIEW: usize = 4 * 1024;
 
 /// Most headers one edit may set or remove.
 pub(crate) const MAX_EDIT_HEADERS: usize = 100;
@@ -43,8 +51,9 @@ pub(crate) fn route(
             Some(enabled) => (StatusCode::OK, json!({"name": name, "enabled": enabled})),
             None => error(StatusCode::NOT_FOUND, "no such rule"),
         },
+        (&Method::GET, ["pauses", id]) => detail(pauses, id),
         (&Method::POST, ["pauses", id, "edit"]) => edit(pauses, id, body),
-        (_, ["rules"] | ["rules", _, "toggle"] | ["pauses", _, "edit"]) => {
+        (_, ["rules"] | ["rules", _, "toggle"] | ["pauses", _, "edit"] | ["pauses", _]) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "wrong method")
         }
         _ => return None,
@@ -64,6 +73,88 @@ fn put_rules(rules: &Rules, body: &Bytes) -> (StatusCode, Value) {
         Ok(()) => (StatusCode::OK, json!(rules.report())),
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
     }
+}
+
+/// `GET /api/v1/pauses/{id}`: the pause, the request and, for a response pause, the response.
+fn detail(pauses: &Pauses, id: &str) -> (StatusCode, Value) {
+    let Some((info, detail)) = id.parse::<u64>().ok().and_then(|id| pauses.detail(id)) else {
+        return error(StatusCode::NOT_FOUND, "no such pending pause");
+    };
+    let Some(detail) = detail else {
+        return (
+            StatusCode::OK,
+            json!({ "id": info.id, "flow_id": info.flow_id, "phase": info.phase,
+                    "request": null, "response": null }),
+        );
+    };
+    let request = &detail.request;
+    let response = detail.response.as_ref().map(|response| {
+        json!({
+            "status": response.status.as_u16(),
+            "headers": header_pairs(&response.headers),
+            "body": body_json(&response.body),
+        })
+    });
+    (
+        StatusCode::OK,
+        json!({
+            "id": info.id,
+            "flow_id": info.flow_id,
+            "phase": info.phase,
+            "request": {
+                "method": request.method.as_str(),
+                "url": request.url,
+                "headers": header_pairs(&request.headers),
+                "body": body_json(&request.body),
+            },
+            "response": response,
+        }),
+    )
+}
+
+/// `[name, value]` pairs in order; a value that is not UTF-8 is shown lossily.
+fn header_pairs(headers: &HeaderMap) -> Vec<(&str, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A paused body for the editor: `state` is `whole`, `too_large` or `not_buffered`. A whole
+/// body comes as `text` (UTF-8, cut at [`TEXT_PREVIEW`]) or, when binary, as `base64` of
+/// its first [`BINARY_PREVIEW`] bytes; `truncated` says whether anything was cut.
+fn body_json(body: &PausedBody) -> Value {
+    let bytes = match body {
+        PausedBody::Whole(bytes) => bytes,
+        PausedBody::TooLarge => return json!({ "state": "too_large" }),
+        PausedBody::NotBuffered => return json!({ "state": "not_buffered" }),
+    };
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let mut end = text.len().min(TEXT_PREVIEW);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        return json!({
+            "state": "whole",
+            "size": bytes.len(),
+            "binary": false,
+            "truncated": end < text.len(),
+            "text": &text[..end],
+        });
+    }
+    let end = bytes.len().min(BINARY_PREVIEW);
+    json!({
+        "state": "whole",
+        "size": bytes.len(),
+        "binary": true,
+        "truncated": end < bytes.len(),
+        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes[..end]),
+    })
 }
 
 /// The JSON body of `POST /api/v1/pauses/{id}/edit`.
@@ -209,6 +300,29 @@ pub(crate) fn parse_url(url: &str) -> Result<(Option<Server>, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paused_bodies_are_cut_at_a_character_boundary() {
+        // "é" is two bytes; the preview limit falls inside the last one.
+        let text = format!("{}é", "a".repeat(TEXT_PREVIEW - 1));
+        let body = body_json(&PausedBody::Whole(Bytes::from(text)));
+        assert_eq!(body["size"], TEXT_PREVIEW + 1);
+        assert_eq!(body["truncated"], true);
+        assert_eq!(
+            body["text"].as_str().map(str::len),
+            Some(TEXT_PREVIEW - 1),
+            "the split character is left out"
+        );
+        let binary = body_json(&PausedBody::Whole(Bytes::from(vec![
+            0xff;
+            BINARY_PREVIEW + 1
+        ])));
+        assert_eq!(binary["truncated"], true);
+        assert_eq!(
+            binary["base64"].as_str().map(str::len),
+            Some(BINARY_PREVIEW.div_ceil(3) * 4)
+        );
+    }
 
     fn parse(json: &str, phase: Phase) -> Result<Edit, String> {
         parse_edit(&Bytes::from(json.to_owned()), phase)

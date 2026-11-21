@@ -119,8 +119,8 @@ profile. Limits, from the platforms' documentation:
 | Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL; [docs/ui.md](docs/ui.md) |
 | Search | `host:` `method:` `status:5xx` `type:json` and more, in the UI, `view` and `export`; [docs/interchange.md](docs/interchange.md) |
 | Rules | block, status, map local, map remote, header and body rewrite (regex, JSON path), delay, throttle; TOML file reloaded on change, editable in the UI; [docs/rules.md](docs/rules.md) |
-| Breakpoints | pause matching requests or responses in the UI; edit a request's method, URL, headers and body, then resume or abort |
-| Replay and compose | send a captured request again, changed or not, from the CLI or the API; [docs/replay.md](docs/replay.md) |
+| Breakpoints | pause matching requests or responses in the UI; see and edit method, URL, status, headers and text body, then resume or abort |
+| Replay and compose | send a captured request again, changed or not (UI, CLI, API), or compose a new one (UI, API); [docs/replay.md](docs/replay.md) |
 | Sessions and HAR | append flows to a JSON Lines session file; export HAR 1.2 from the UI or CLI, import HAR from browser dev tools |
 | WebSocket | text, binary and control messages of HTTP/1.1 WebSockets, with a Messages tab; [docs/websocket.md](docs/websocket.md) |
 | gRPC, protobuf | schema-less decoding of gRPC, gRPC-Web and protobuf messages, `grpc-status` from trailers, a gRPC tab; [docs/grpc.md](docs/grpc.md) |

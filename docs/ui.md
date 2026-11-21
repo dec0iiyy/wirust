@@ -42,13 +42,19 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   `(2) wirust`, and the button is outlined red while anything is paused; no sound, no
   notifications). Pending pauses come from `GET /api/v1/pauses` on start and on every
   reconnect, then live from the `paused` / `resumed` events; a new pause opens the panel.
-  Selecting one selects its flow. The editor:
+  Selecting one selects its flow. The editor is filled from `GET /api/v1/pauses/{id}`, so
+  it shows what the pause really holds (after earlier rules ran):
   - request phase: method, URL (a different scheme or host sends the request there), the
     request headers as an editable table (edit value, delete row, add row; HTTP/2 pseudo
-    headers are not listed), and an optional replacement body as text or base64;
-  - response phase: status (empty keeps it), headers to set, header names to remove, an
-    optional body. The response itself is not visible until it is released (the flow
-    record only arrives on completion), and neither is a paused request's body.
+    headers are not listed), and the body;
+  - response phase: status, the response headers as the same table, and the body;
+  - body: UTF-8 text up to 256 KB is editable in place. A binary body shows
+    `binary, N bytes, not editable` and a hex dump of its first 4 KB; a longer text body
+    shows its start read-only; a body over `--body-limit` is not shown at all. In those
+    three cases the body goes on unchanged unless **Replace the body** is ticked (text or
+    base64). Breakpoint rules make the proxy buffer bodies up to `--body-limit`, like body
+    rewrites do. When the detail cannot be loaded the editor falls back to the flow
+    record, headers to set or remove, and a replacement body.
   - **Resume**, **Edit and resume** (sends only what changed to
     `POST /api/v1/pauses/{id}/edit`; repeated header names are joined with `, `, or `; `
     for `Cookie`), **Abort**. A `400` shows the server's message in the editor and the pause
@@ -72,10 +78,22 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   `http://wirust.test/ca.pem` (reachable through the proxy) and a direct download through the
   API, the CA's SHA-256 fingerprint to compare after installing, the rules and session
   files, and a pointer to `wirust connect` for phones.
-- **Replay / Compose slot**: `<span id="replay-slot">` in the detail pane toolbar stays
-  hidden unless `window.WIRUST_REPLAY` is set when the page loads; its owner fills it. No
-  UI file sets it yet: replay, compose and the passthrough lists are API and CLI only
-  (`docs/replay.md`, `docs/passthrough.md`).
+- **Replay / Compose** (`ui/replay.js`, buttons in the detail pane toolbar):
+  - **Replay** sends the selected finished exchange again as it was
+    (`POST /api/v1/flows/{id}/replay`), then selects the new flow.
+  - **Edit & replay** opens a dialog with method, URL, headers and body taken from the flow
+    and sends only what changed. A stored binary body is shown as a hex dump and sent as
+    recorded unless replaced; a body cut by `--body-limit` must be replaced (the server
+    answers `409` otherwise).
+  - **New request** composes one from scratch (`POST /api/v1/compose`): method, absolute
+    URL, headers in order, text body.
+  - Both dialogs have **Apply rules and breakpoints** (off by default). A refusal is shown
+    in the dialog in plain words: `429` says at most 8 replays are in flight and 20 start
+    per second, `409` and `403` show the server's reason.
+  - The **Replay** tab appears on a replay (flag `replay`): it links to the original flow
+    and compares method, URL, status and size side by side (differences highlighted). An
+    original that has replays lists them.
+  - The passthrough lists stay API and CLI only (`docs/passthrough.md`).
 - **Detail pane** (drag or arrow-key the bar above it to resize):
   - Overview: URL, status, client address, HTTP version on each leg, body sizes, flags
     (`pause_timed_out`, ...), error, and a timing waterfall (connect, TLS, first byte,
@@ -142,7 +160,8 @@ pane, not thrown.
 
 The fragment may also carry `flow=ID`, `tab=overview|tls|request|response`, `q=FILTER` and
 `panel=pauses|rules|connect|help` to open a flow, a tab, a filter or a panel:
-`/#token=...&flow=12&tab=tls&panel=rules`.
+`/#token=...&flow=12&tab=tls&panel=rules`. `panel=compose` opens **New request** and
+`panel=edit-replay` (with `flow=ID`) opens **Edit & replay** for that flow.
 
 `GET /api/v1/info` (same token, `Host` and `Origin` checks) answers
 `{"name", "version", "proxy_addr", "magic_host", "ca_fingerprint_sha256", "rules_file",
