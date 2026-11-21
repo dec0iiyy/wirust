@@ -168,7 +168,7 @@ fn usage() -> String {
 
 Usage:
   {NAME} [--listen ADDR] [--json] [--body-limit BYTES] [--upstream-insecure]
-         [--upstream-proxy URL] [--upstream-bypass LIST]
+         [--upstream-proxy URL] [--upstream-bypass LIST] [--system-proxy]
          [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
          [--block-host HOST]... [--rules FILE] [--session FILE]
@@ -331,12 +331,76 @@ Options:
 
 Usage:
   {NAME} ca path|show|install-help [--config-dir DIR]
+  {NAME} ca install|uninstall|status [--yes] [--config-dir DIR]
 
   path           print where the CA certificate file is
   show           print the CA certificate (PEM)
   install-help   how to trust the CA on macOS, Linux and Windows
+  install        trust the CA for the current user only
+  uninstall      remove exactly that certificate from the user's trust store
+  status         say whether the CA is trusted
 
 The CA is created on first use. See `{NAME} ca path --help`.
+"
+        ),
+        ["ca", "install"] => format!(
+            "{NAME} ca install: trust the CA for the current user
+
+Usage:
+  {NAME} ca install [--yes] [--config-dir DIR]
+
+Adds the CA to the current user's trust store: the login keychain on macOS, the user Root
+store on Windows. On Linux it prints the commands instead. It shows the plan and the CA's
+SHA-256 fingerprint and waits for `yes`; it never uses sudo and never touches the system
+store. See docs/desktop.md.
+
+Options:
+  --yes                 do not ask for confirmation
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["ca", "uninstall"] => format!(
+            "{NAME} ca uninstall: remove the CA from the user's trust store
+
+Usage:
+  {NAME} ca uninstall [--yes] [--config-dir DIR]
+
+Removes exactly the certificate whose fingerprint matches this CA, and nothing else.
+Asks for `yes` first.
+
+Options:
+  --yes                 do not ask for confirmation
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["ca", "status"] => format!(
+            "{NAME} ca status: say whether the CA is trusted
+
+Usage:
+  {NAME} ca status [--config-dir DIR]
+
+Prints whether the user's trust store has this CA, with its SHA-256 fingerprint.
+
+Options:
+  --config-dir DIR      where the CA is kept (default: the platform config dir)
+"
+        ),
+        ["system-proxy"] => format!(
+            "{NAME} system-proxy: point this computer's system proxy at wirust
+
+Usage:
+  {NAME} system-proxy on|off|status [--port P] [--config-dir DIR]
+
+  on       save the current settings, then set the web and secure web proxy to 127.0.0.1:P
+  off      restore the saved settings
+  status   show the current settings and whether wirust changed them
+
+A plain run does the same while it lives with --system-proxy and restores on exit. After a
+crash, `{NAME} system-proxy off` restores the old settings. See docs/desktop.md.
+
+Options:
+  --port P              proxy port (default {DEFAULT_PORT})
+  --config-dir DIR      where the saved settings are kept (default: the platform config dir)
 "
         ),
         ["ca", "path"] => format!(
@@ -825,6 +889,17 @@ fn system_proxy(
     Ok(())
 }
 
+/// Puts the system proxy settings back on the way out and says so (or how to do it by hand).
+fn restore_system_proxy(guard: Option<sysproxy::Guard<SystemRunner>>) {
+    let Some(guard) = guard else { return };
+    match guard.restore() {
+        Ok(_) => eprintln!("{NAME}: restored the system proxy settings"),
+        Err(e) => eprintln!(
+            "{NAME}: could not restore the system proxy ({e:#}); run `{NAME} system-proxy off`"
+        ),
+    }
+}
+
 /// For `--system-proxy`: restores what a crashed run left, then points the system proxy at
 /// `listen`. Without the flag, only warns about a leftover state file.
 fn start_system_proxy(
@@ -1051,15 +1126,7 @@ fn run(
             result = proxy.run() => result,
             () = sysproxy::shutdown_signal() => Ok(()),
         };
-        if let Some(guard) = system_proxy {
-            match guard.restore() {
-                Ok(_) => eprintln!("{NAME}: restored the system proxy settings"),
-                Err(e) => eprintln!(
-                    "{NAME}: could not restore the system proxy ({e:#}); run `{NAME} \
-                     system-proxy off`"
-                ),
-            }
-        }
+        restore_system_proxy(system_proxy);
         printer.abort();
         if let Some(control) = control {
             control.abort();
