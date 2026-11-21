@@ -1,0 +1,33 @@
+{
+    "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+    "version": "0.1.0",
+    "description": "Single-binary HTTPS debugging proxy with a web UI: decrypts TLS with a local CA, shows each client's TLS fingerprint (JA4, JA3)",
+    "homepage": "https://github.com/dec0iiyy/wirust",
+    "license": "GPL-3.0-only",
+    "notes": [
+        "wirust is not code-signed, so Windows SmartScreen may warn on first start.",
+        "Start it with: wirust --ui 127.0.0.1:8081",
+        "Trust its CA with: wirust ca install-help"
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/dec0iiyy/wirust/releases/download/v0.1.0/wirust-v0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "2074610083429db43c7e49eba4fa5d8d510588b01d35d24a8b26d3f1ade7043b",
+            "extract_dir": "wirust-v0.1.0-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": "wirust.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/dec0iiyy/wirust/releases/download/v$version/wirust-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "wirust-v$version-x86_64-pc-windows-msvc",
+                "hash": {
+                    "url": "$baseurl/SHA256SUMS",
+                    "regex": "$sha256\\s+$basename"
+                }
+            }
+        }
+    }
+}
