@@ -109,6 +109,8 @@ profile. Limits, from the platforms' documentation:
 - Apps that pin certificates fail the handshake (`TLS-FAIL`); apps that ignore the system
   proxy (Flutter's `dart:io`, raw sockets) and HTTP/3 never reach it.
 - None of this has been tried on a real phone or simulator yet. See [docs/mobile.md](docs/mobile.md).
+- Experimental, not in release builds: a WireGuard capture mode (cargo feature `wireguard`)
+  catches the TCP traffic of apps that ignore the proxy; see [docs/wireguard.md](docs/wireguard.md).
 
 ## Features
 

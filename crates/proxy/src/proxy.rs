@@ -576,6 +576,80 @@ async fn pass_through<S>(
     state.emit(Event::Tunnel(record));
 }
 
+/// Serves a TCP connection the WireGuard capture mode terminated, as if `peer` had sent
+/// CONNECT to `dst`: TLS goes through [`tunnel`] under its SNI, plain HTTP on port 80 is
+/// forwarded request by request under its `Host` header, anything else is relayed raw.
+///
+/// Destinations on this machine (loopback, unspecified, the refused addresses, the proxy's
+/// own listener, and an SNI or `Host` of `localhost`) are dropped, so a peer cannot reach
+/// services that listen on loopback only.
+#[cfg(feature = "wireguard")]
+pub(crate) async fn serve_transparent<S>(
+    state: Arc<State>,
+    peer: SocketAddr,
+    dst: SocketAddr,
+    io: S,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn local(state: &State, host: &str, port: u16) -> bool {
+        let ip: Option<IpAddr> = unbracket(host).parse().ok();
+        host.eq_ignore_ascii_case("localhost")
+            || ip.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
+            || state.refuses(host, port)
+            || same_machine(host, port, state.listen)
+    }
+    let ip = dst.ip().to_string();
+    if local(&state, &ip, dst.port()) {
+        return;
+    }
+    if dst.port() == 80 {
+        let service = service_fn(move |request: Request<Incoming>| {
+            let state = Arc::clone(&state);
+            async move {
+                let host = (request.headers().get(header::HOST))
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<http::uri::Authority>().ok())
+                    .map_or_else(|| dst.ip().to_string(), |a| unbracket(a.host()).to_owned());
+                if local(&state, &host, dst.port()) {
+                    return Ok::<_, Infallible>(refused());
+                }
+                let target = Target {
+                    scheme: "http",
+                    host,
+                    port: dst.port(),
+                    server_name: String::new(),
+                    offer_h2: false,
+                    tls: None,
+                };
+                Ok(forward(&state, peer, &target, None, request).await)
+            }
+        });
+        // A client that disconnects mid-request is normal; there is no one to tell.
+        let _ = http1::Builder::new()
+            .preserve_header_case(true)
+            .serve_connection(TokioIo::new(io), service)
+            .with_upgrades()
+            .await;
+        return;
+    }
+    let mut io = io;
+    let Ok(peeked) = hello::peek(&mut io).await else {
+        return;
+    };
+    let (host, raw) = match peeked {
+        Peeked::Tls { raw, message } => {
+            let sni = hello::sni(&ClientHello::parse(&message));
+            (sni.unwrap_or(ip), raw)
+        }
+        Peeked::Other { raw } => (ip, raw),
+    };
+    if local(&state, &host, dst.port()) {
+        return;
+    }
+    tunnel(state, peer, host, dst.port(), Prefixed::new(raw, io)).await;
+}
+
 /// Where a tunnel or request goes, and what the client leg looked like.
 #[derive(Debug)]
 struct Target {

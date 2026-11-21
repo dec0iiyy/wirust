@@ -13,6 +13,9 @@ targets = [
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
+# Also check the crates of the optional features (the experimental `wireguard`), so advisories
+# and licences are known before a feature is turned on.
+all-features = true
 
 [advisories]
 # A yanked version is a version its author withdrew; fail on it.
@@ -39,6 +42,24 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+
+# Only in the experimental `wireguard` feature (off by default): smoltcp and its `managed`
+# are 0BSD, boringtun's `ip_network` crates BSD-2-Clause. Both are permissive.
+[[licenses.exceptions]]
+crate = "smoltcp"
+allow = ["0BSD"]
+
+[[licenses.exceptions]]
+crate = "managed"
+allow = ["0BSD"]
+
+[[licenses.exceptions]]
+crate = "ip_network"
+allow = ["BSD-2-Clause"]
+
+[[licenses.exceptions]]
+crate = "ip_network_table"
+allow = ["BSD-2-Clause"]
 
 # This workspace and the `fingerprint` git dependency are GPL-3.0-only; the exception names
 # exactly these two crates, so no other GPL crate can slip in.
