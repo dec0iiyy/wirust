@@ -20,11 +20,13 @@ Each file in `SHA256SUMS` also gets a signed build provenance attestation.
 
 1. Check that `main` is green in CI and that `THIRD-PARTY-LICENSES.md` is current:
    `python3 .github/scripts/third-party-licenses.py --check`.
-2. Set `version` in `crates/proxy/Cargo.toml` (the first release stays at 0.1.0), run
-   `cargo check` so `Cargo.lock` follows, and commit.
+2. Set `version` in `crates/proxy/Cargo.toml`, run `cargo check` so `Cargo.lock` follows,
+   and commit.
 3. Optional dry run (below) on that commit.
-4. Tag and push: `git tag -a v0.1.0 -m v0.1.0 && git push origin v0.1.0`.
-5. The workflow checks that the tag equals `v` + the package version, builds the five
+4. Tag and push: `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+5. After the release exists, run `scripts/update-manifests.sh X.Y.Z` to refresh the Scoop and
+   winget manifests (see `packaging/README.md`), commit and push.
+6. The workflow checks that the tag equals `v` + the package version, builds the five
    targets, runs the whole test suite for each target in the release profile, smoke-tests the
    binaries, writes `SHA256SUMS`, attests and creates the release with generated notes
    (categories in `.github/release.yml`). A tag with a hyphen (`v0.2.0-rc.1`) is a
