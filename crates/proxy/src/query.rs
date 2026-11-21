@@ -777,6 +777,7 @@ pub(crate) mod tests {
             upstream_url: None,
             replay_of: None,
             ws_messages: None,
+            response_trailers: Vec::new(),
         }
     }
 

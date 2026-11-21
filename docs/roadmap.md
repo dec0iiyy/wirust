@@ -6,7 +6,8 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
 4. WebSocket: `permessage-deflate` decoding instead of stripping, a `ws:` search field,
    messages in session files, sending and editing messages.
 5. WebSocket over HTTP/2 (RFC 8441 extended CONNECT).
-6. gRPC and protobuf body views; bodies are shown as JSON, text, images or hex.
+6. gRPC with `.proto` files or server reflection (field names), and inflating compressed
+   messages; today messages are decoded schema-less and compressed ones only listed.
 7. Scripting: rules are declarative TOML, with no user code.
 8. HTTP/3 interception: QUIC is UDP and cannot go through an HTTP CONNECT tunnel, so clients
    fall back to h2 or HTTP/1.1. It needs a MASQUE (`CONNECT-UDP`) or transparent mode.

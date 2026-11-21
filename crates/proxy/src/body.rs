@@ -7,12 +7,19 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 
-/// The first bytes of a body plus its full size.
+/// Trailer fields a [`Capture`] keeps.
+const MAX_TRAILERS: usize = 64;
+
+/// Bytes of trailer names and values a [`Capture`] keeps.
+const MAX_TRAILER_BYTES: usize = 16 * 1024;
+
+/// The first bytes of a body plus its full size, and its trailers (HTTP/2 or chunked).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capture {
     limit: usize,
     data: Vec<u8>,
     size: u64,
+    trailers: Vec<(String, String)>,
 }
 
 impl Capture {
@@ -23,7 +30,28 @@ impl Capture {
             limit,
             data: Vec::new(),
             size: 0,
+            trailers: Vec::new(),
         }
+    }
+
+    /// Records a trailer block, up to 64 fields and 16 KiB of names and values.
+    pub fn push_trailers(&mut self, trailers: &http::HeaderMap) {
+        let mut used: usize = self.trailers.iter().map(|(k, v)| k.len() + v.len()).sum();
+        for (name, value) in trailers {
+            let value = String::from_utf8_lossy(value.as_bytes());
+            used += name.as_str().len() + value.len();
+            if self.trailers.len() == MAX_TRAILERS || used > MAX_TRAILER_BYTES {
+                break;
+            }
+            self.trailers
+                .push((name.as_str().to_owned(), value.into_owned()));
+        }
+    }
+
+    /// The kept trailers, in the order received.
+    #[must_use]
+    pub fn trailers(&self) -> &[(String, String)] {
+        &self.trailers
     }
 
     /// Records one chunk: all of it counts toward the size, the part under the limit is kept.
@@ -112,6 +140,11 @@ where
                         .lock()
                         .expect("capture lock poisoned")
                         .push(data);
+                } else if let Some(trailers) = frame.trailers_ref() {
+                    this.capture
+                        .lock()
+                        .expect("capture lock poisoned")
+                        .push_trailers(trailers);
                 }
             }
             Poll::Ready(Some(Err(e))) => this.finish(Some(e.to_string())),
