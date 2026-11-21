@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<script src="/theme.js"></script>
 <script src="/panels.js" defer></script>
-<title>Flows</title>
+<title>wirust</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjM2I4MmY2Ii8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjNmQ0ZmUwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0idXJsKCNnKSIvPjxwYXRoIGQ9Ik02LjggMTAuNCAxMC45IDIyLjYgMTYgMTIuNmw1LjEgMTAgNC4xLTEyLjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=">
 <link rel="stylesheet" href="/style.css">
 <script src="/app.js" defer></script>
 <link rel="stylesheet" href="/ws.css">
@@ -20,25 +22,39 @@
 </head>
 <body>
 <header class="toolbar" role="banner">
-  <div class="search">
-    <label for="search" class="visually-hidden">Filter flows</label>
-    <input id="search" type="search" autocomplete="off" spellcheck="false"
-      placeholder="Filter  ( / )   host:api  method:POST  status:4xx  type:json  text"
-      aria-describedby="search-help">
-    <span id="search-help" class="visually-hidden">Tokens host:, method:, status:, type:; other words match the URL and headers. Press Escape to clear.</span>
+  <div class="toolbar-main">
+    <div class="brand" aria-label="wirust"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name" aria-hidden="true">wirust</span></div>
+    <!-- Toolbar buttons are grouped by meaning; panels.js fills share and control. -->
+    <div class="actions">
+      <div class="btn-group" data-group="capture" role="group" aria-label="Capture">
+        <button type="button" id="follow" class="toggle" data-icon="follow" aria-pressed="true" title="Keep the newest flow in view" aria-label="Follow"><span class="btn-label">Follow</span></button>
+        <button type="button" id="clear" data-icon="clear" title="Hide the flows loaded so far (the proxy keeps them)" aria-label="Clear"><span class="btn-label">Clear</span></button>
+      </div>
+      <div class="btn-group" data-group="share" role="group" aria-label="Share"></div>
+      <div class="btn-group" data-group="control" role="group" aria-label="Control"></div>
+    </div>
+    <div class="toolbar-status">
+      <span id="conn" class="conn" data-state="connecting" role="status">connecting</span>
+      <button type="button" id="theme-toggle" class="theme-toggle ghost" data-icon="theme" aria-label="Theme: system" title="Theme: system"></button>
+    </div>
   </div>
-  <div class="chips" role="group" aria-label="Quick filters">
-    <button type="button" class="chip" data-chip="errors" aria-pressed="false">Errors</button>
-    <button type="button" class="chip" data-chip="slow" aria-pressed="false" title="1 s or longer">Slow</button>
-    <button type="button" class="chip" data-chip="json" aria-pressed="false">JSON</button>
-    <button type="button" class="chip" data-chip="images" aria-pressed="false">Images</button>
-    <button type="button" class="chip" data-chip="tls" aria-pressed="false">TLS failures</button>
-  </div>
-  <div class="actions">
-    <button type="button" id="follow" class="toggle" aria-pressed="true" title="Keep the newest flow in view">Follow</button>
-    <button type="button" id="clear" title="Hide the flows loaded so far (the proxy keeps them)">Clear</button>
+  <div class="filterbar">
+    <div class="search">
+      <label for="search" class="visually-hidden">Filter flows</label>
+      <input id="search" type="search" autocomplete="off" spellcheck="false"
+        placeholder="Filter: host:api status:4xx type:json"
+        aria-describedby="search-help">
+      <kbd class="kbd" aria-hidden="true">/</kbd>
+      <span id="search-help" class="visually-hidden">Tokens host:, method:, status:, type:; other words match the URL and headers. Press Escape to clear.</span>
+    </div>
+    <div class="chips" role="group" aria-label="Quick filters">
+      <button type="button" class="chip" data-chip="errors" aria-pressed="false">Errors</button>
+      <button type="button" class="chip" data-chip="slow" aria-pressed="false" title="1 s or longer">Slow</button>
+      <button type="button" class="chip" data-chip="json" aria-pressed="false">JSON</button>
+      <button type="button" class="chip" data-chip="images" aria-pressed="false">Images</button>
+      <button type="button" class="chip" data-chip="tls" aria-pressed="false">TLS failures</button>
+    </div>
     <span id="count" class="count" aria-live="polite"></span>
-    <span id="conn" class="conn" data-state="connecting" role="status">connecting</span>
   </div>
 </header>
 

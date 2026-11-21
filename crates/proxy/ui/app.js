@@ -61,7 +61,7 @@ const hooks = { pause: [], load: [], detail: [] };
 // ---------------------------------------------------------------------------
 // State
 
-const ROW_H = 24;
+const ROW_H = 26; // matches --row-h in style.css
 const OVERSCAN = 8;
 const SLOW_MS = 1000;
 
@@ -315,6 +315,7 @@ function rebuild() {
   el.viewport.setAttribute("aria-rowcount", String(view.length));
   el.empty.hidden = view.length > 0;
   el.empty.textContent = flows.size ? "No flows match the filter." : "No flows yet. Send traffic through the proxy.";
+  el.empty.dataset.state = flows.size ? "filtered" : "none";
   el.count.textContent = view.length === flows.size ? flows.size + " flows" : view.length + " of " + flows.size;
   if (follow && view.length) el.viewport.scrollTop = el.viewport.scrollHeight;
   renderRows(true);
@@ -352,6 +353,8 @@ function makeRow() {
   row.ruleBadges = h("span", "rule-badges");
   row.pathText = h("span");
   row.cells.path.append(row.ruleBadges, row.pathText);
+  row.hostParts = [h("span", "host-sub"), h("span", "host-main"), h("span", "host-port")];
+  row.cells.host.append(...row.hostParts);
   row.addEventListener("click", () => select(row.flowId, false));
   el.viewport.append(row);
   return row;
@@ -367,6 +370,19 @@ function fmtSize(n) {
 function fmtMs(ms) {
   if (ms == null) return "";
   return ms < 10 ? ms.toFixed(1) : String(Math.round(ms));
+}
+
+/**
+ * A host split for display: [subdomains with their dot, the last two labels, ":port"], so the
+ * list can dim the parts that repeat. IP addresses and single labels stay whole.
+ */
+function hostParts(host) {
+  const text = String(host || "");
+  const port = /:\d+$/.test(text) && !/^\[.*\]$/.test(text) ? text.slice(text.lastIndexOf(":")) : "";
+  const name = port ? text.slice(0, -port.length) : text;
+  const labels = name.split(".");
+  if (labels.length <= 2 || name.startsWith("[") || /^[\d.]+$/.test(name)) return ["", name, port];
+  return [labels.slice(0, -2).join(".") + ".", labels.slice(-2).join("."), port];
 }
 
 /** Status text and class: the number is the text alternative to the colour. */
@@ -390,7 +406,8 @@ function fillRow(row, m, index) {
   c.id.textContent = m.id;
   c.time.textContent = m.time;
   c.method.textContent = m.method;
-  c.host.textContent = m.host;
+  c.method.dataset.method = String(m.method || "").toUpperCase();
+  hostParts(m.host).forEach((part, i) => { row.hostParts[i].textContent = part; });
   c.host.title = m.host;
   row.pathText.textContent = m.path;
   row.ruleBadges.replaceChildren(...m.rules.map((r) => h("span", "badge rule", r)));
@@ -783,9 +800,13 @@ function overview(panel, m) {
     return;
   }
   panel.append(h("h3", null, "Request"));
-  panel.append(h("div", "url", (f.method || "") + " " + f.url));
+  const method = h("span", "c-method url-method", f.method || "");
+  method.dataset.method = String(f.method || "").toUpperCase();
+  panel.append(h("div", "url", null, [method, " " + f.url]));
   if (f.error) panel.append(h("div", "error-box", "Error: " + f.error));
-  const status = f.status != null ? f.status + " " + (f.reason || "") : m.state === "pending" ? "in progress" : "";
+  const status = f.status != null
+    ? h("span", "status-pill s-" + Math.floor(f.status / 100), f.status + " " + (f.reason || ""))
+    : m.state === "pending" ? "in progress" : "";
   const flags = f.flags && f.flags.length
     ? h("span", null, null, f.flags.map((x) => h("span", x.startsWith("rule:") ? "badge rule" : "badge", x)))
     : null;
