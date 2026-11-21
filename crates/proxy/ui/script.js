@@ -6,33 +6,31 @@
 "use strict";
 
 document.addEventListener("DOMContentLoaded", () => {
-  const actions = document.querySelector(".toolbar .actions");
+  // The button joins the "control" group next to Breakpoints and Rules (see "Styling
+  // extensions" in docs/ui.md); the panel is a generic surface placed by .script-panel.
+  const actions = document.querySelector('.toolbar .btn-group[data-group="control"]')
+    || document.querySelector(".toolbar .actions");
   if (!actions) return;
   const REFRESH_MS = 2000;
   let entries = [];
   let lastSeq = 0;
   let timer = null;
 
-  const box = h("div", "script-panel");
+  const box = h("div", "script-panel surface");
   box.id = "script-panel";
   box.hidden = true;
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-label", "Scripts");
-  Object.assign(box.style, {
-    position: "fixed", right: "16px", top: "56px", zIndex: "50",
-    width: "min(560px, calc(100vw - 32px))", maxHeight: "70vh", overflow: "auto",
-    padding: "12px", background: "var(--bg)", color: "var(--fg)",
-    border: "1px solid var(--fg-dim)", borderRadius: "6px",
-  });
   document.body.append(box);
 
-  const button = h("button", null, "Scripts");
+  const button = h("button", null, null, [h("span", "btn-label", "Scripts")]);
   button.type = "button";
+  button.dataset.icon = "script";
   button.hidden = true;
   button.setAttribute("aria-controls", box.id);
   button.setAttribute("aria-expanded", "false");
   button.addEventListener("click", () => (box.hidden ? open() : close()));
-  actions.prepend(button);
+  actions.append(button);
 
   function close() {
     box.hidden = true;
@@ -66,18 +64,12 @@ document.addEventListener("DOMContentLoaded", () => {
         h("strong", null, s.file),
         h("span", null, " — " + status + " — " + hooks),
       ]);
-      if (s.error) {
-        const err = h("pre", null, s.error);
-        err.style.whiteSpace = "pre-wrap";
-        err.style.color = "var(--fg-dim)";
-        row.append(err);
-      }
+      if (s.error) row.append(h("pre", "script-error", s.error));
       return row;
     });
     const log = h("pre", null, entries.length
       ? entries.map((e) => e.time + "  " + e.file + "  " + e.level + "  " + e.text).join("\n")
       : "No log lines yet.");
-    log.style.whiteSpace = "pre-wrap";
     log.setAttribute("aria-live", "polite");
     box.replaceChildren(
       h("h2", null, "Scripts"),

@@ -17,7 +17,7 @@ it relays without decrypting. That tells you which TLS stack an app really uses,
 User-Agent says. It is free software (GPL-3.0-only), one binary, no account, no
 telemetry.
 
-Status: 0.2.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
+Status: 0.3.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
 
 ![The flow list with the Client TLS tab of a request and a paused breakpoint](docs/img/flows-client-tls.png)
 
@@ -212,16 +212,19 @@ passthrough, WebSocket, gRPC, phones, architecture, design, roadmap and releasin
 
 ## Status
 
-Version 0.2.0. 231 automated tests (unit and
-integration, offline, in-process servers and clients on loopback) run in CI on Linux, macOS
-and Windows, plus a check against Rust 1.88. They cover HTTP/1.1 and HTTP/2 interception, the
-flow record and fingerprints, failed handshakes, every control-plane security check, rules
-and breakpoints, replay, passthrough, WebSocket capture, gRPC and protobuf decoding,
-`Content-Encoding` decoding, upstream proxies, the system-proxy and trust-store commands (with
-a fake command runner), HAR, pairing and the UI assets. Checked by hand: curl through the
-proxy, the web UI in headless Chrome, and Chrome on an Android 16 emulator over `adb` (setup,
-installing the CA, decrypted HTTPS, reset on exit). Not tried yet: real phones, anything on
-iOS, `system-proxy` and `ca install` on the real operating systems, Windows outside CI.
+Version 0.3.0. 302 automated tests (unit and integration, offline, in-process servers and
+clients on loopback) run in CI on Linux, macOS and Windows, plus a check against Rust 1.88.
+They cover HTTP/1.1 and HTTP/2 interception, the flow record and fingerprints, failed
+handshakes, every control-plane security check, rules and breakpoints, scripts and their
+sandbox, replay, passthrough, WebSocket capture (including `permessage-deflate` and injected
+messages), gRPC and protobuf decoding with and without `.proto` schemas, `Content-Encoding`
+decoding, the code generators, upstream proxies, the system-proxy and trust-store commands
+(with a fake command runner), HAR, pairing and the UI assets. Checked by hand: curl through
+the proxy, the web UI in headless Chrome (dark and light, down to 760 px wide), and Chrome on
+an Android 16 emulator over `adb` (setup, installing the CA, decrypted HTTPS, reset on exit).
+Not tried yet: real phones, anything on iOS, `system-proxy` and `ca install` on the real
+operating systems, the experimental WireGuard mode outside its in-process test, Windows
+outside CI.
 
 ## Licence
 
