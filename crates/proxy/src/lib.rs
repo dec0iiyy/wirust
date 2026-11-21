@@ -24,6 +24,7 @@ pub mod har;
 mod har_api;
 pub mod hello;
 pub mod intercept;
+pub mod logfold;
 mod magic;
 pub mod mobile;
 pub mod mobileconfig;

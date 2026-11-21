@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use http::{HeaderName, HeaderValue, StatusCode};
@@ -15,7 +15,9 @@ use wirust::adb::{self, Adb};
 use wirust::ca::Ca;
 use wirust::control::ControlPlane;
 use wirust::events::{DEFAULT_MAX_FLOWS, FlowEvent};
+use wirust::flow::Event;
 use wirust::intercept::{BlockHost, DEFAULT_PAUSE_TIMEOUT, HeaderRules};
+use wirust::logfold::Folder;
 use wirust::oscmd::{Platform, SystemRunner};
 use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
@@ -1206,44 +1208,73 @@ fn start_rules(rules: &Rules, control: Option<&ControlPlane>, watch_file: bool) 
 
 /// Prints every finished flow, as text or as JSON Lines of the stored flow schema.
 /// With `ws_log`, also one short line per WebSocket message.
+///
+/// In text mode, repeated TLS failures of one host and error are folded into a summary line
+/// (see [`Folder`]); the summary of a window that closes is printed on time even when no
+/// other event arrives. JSON output has one object per event and is never folded.
 async fn print_flows(
     mut events: tokio::sync::broadcast::Receiver<FlowEvent>,
     json: bool,
     ws_log: WsLog,
 ) {
     let mut stdout = std::io::stdout();
+    let mut folder = Folder::new();
     loop {
-        let flow = match events.recv().await {
-            Ok(event) => match event.flow() {
-                Some(flow) => Arc::clone(flow),
-                None => match &event {
-                    FlowEvent::WsMessage(message) if ws_log == WsLog::Lines => {
-                        if writeln!(stdout, "{}", ws::log_line(message)).is_err() {
-                            break;
-                        }
-                        continue;
+        let received = match folder.next_deadline() {
+            Some(deadline) => tokio::select! {
+                received = events.recv() => received,
+                () = tokio::time::sleep_until(deadline.into()) => {
+                    if print_lines(&mut stdout, &folder.expire(Instant::now())).is_err() {
+                        break;
                     }
-                    _ => continue,
-                },
+                    continue;
+                }
             },
+            None => events.recv().await,
+        };
+        let lines = match received {
+            Ok(event) => console_lines(&event, json, ws_log, &mut folder),
             Err(RecvError::Lagged(missed)) => {
                 eprintln!("{NAME}: the log fell behind and skipped {missed} events");
                 continue;
             }
             Err(RecvError::Closed) => break,
         };
-        let line = if json {
-            serde_json::to_string(&*flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
-        } else {
-            flow.record.to_string()
-        };
-        if writeln!(stdout, "{line}")
-            .and_then(|()| stdout.flush())
-            .is_err()
-        {
+        if print_lines(&mut stdout, &lines).is_err() {
             break;
         }
     }
+}
+
+/// The console lines `event` turns into: none for events the console does not show.
+fn console_lines(event: &FlowEvent, json: bool, ws_log: WsLog, folder: &mut Folder) -> Vec<String> {
+    let now = Instant::now();
+    match event.flow() {
+        Some(flow) if json => vec![
+            serde_json::to_string(&**flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+        ],
+        Some(flow) => {
+            let failure = match &flow.record {
+                Event::TlsFailure(failure) => Some(failure),
+                _ => None,
+            };
+            folder.lines(now, failure, flow.record.to_string())
+        }
+        None => match event {
+            FlowEvent::WsMessage(message) if ws_log == WsLog::Lines => {
+                folder.lines(now, None, ws::log_line(message))
+            }
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// Writes each line and flushes, so a pipe sees them at once.
+fn print_lines(out: &mut std::io::Stdout, lines: &[String]) -> std::io::Result<()> {
+    for line in lines {
+        writeln!(out, "{line}")?;
+    }
+    out.flush()
 }
 
 #[cfg(test)]

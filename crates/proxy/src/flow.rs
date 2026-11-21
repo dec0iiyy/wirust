@@ -389,8 +389,20 @@ pub struct TunnelTls {
 }
 
 /// `HH:MM:SS` of an RFC 3339 time.
-fn clock(time: &str) -> &str {
+pub(crate) fn clock(time: &str) -> &str {
     time.get(11..19).unwrap_or(time)
+}
+
+impl TlsFailure {
+    /// The host the client was after: its server name, or else the host of the CONNECT target.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        self.sni.as_deref().unwrap_or_else(|| {
+            self.target
+                .rsplit_once(':')
+                .map_or(self.target.as_str(), |(h, _)| h)
+        })
+    }
 }
 
 impl fmt::Display for Event {
@@ -437,15 +449,11 @@ impl fmt::Display for Event {
                 if let Some(client) = &t.known_client {
                     write!(f, ", {client}")?;
                 }
-                let host = t.sni.as_deref().unwrap_or_else(|| {
-                    t.target
-                        .rsplit_once(':')
-                        .map_or(t.target.as_str(), |(h, _)| h)
-                });
                 write!(
                     f,
                     ")  hint: the client does not trust the CA or pins certificates; \
-                     to relay it undecrypted: --passthrough {host}"
+                     to relay it undecrypted: --passthrough {}",
+                    t.host()
                 )
             }
             Self::Tunnel(t) => {

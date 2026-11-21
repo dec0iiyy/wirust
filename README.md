@@ -91,6 +91,11 @@ Without `--ui`, it prints one line per exchange (`--json` for JSON Lines):
 13:31:07 TLS-FAIL example.com via example.com:443  received fatal alert: UnknownCA  (ja4 t13d4907h2_...)  hint: the client does not trust the CA or pins certificates
 ```
 
+When a client keeps rejecting the CA, only its first `TLS-FAIL` per host and error is printed
+in full; the repeats within 30 seconds become one line such as
+`13:31:09 TLS-FAIL example.com (x4 more in the last 30 s)  received fatal alert: UnknownCA`.
+The UI, the session file and `--json` still have every failure.
+
 ## Connect a phone
 
 ```sh
