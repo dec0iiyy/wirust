@@ -576,11 +576,13 @@ impl Act {
             ),
             ActionConfig::Status { status: code } => Self::Status(status(*code)?),
             ActionConfig::MapLocal { path, strip_prefix } => {
-                let path = match base {
+                let full = match base {
                     Some(base) if path.is_relative() => base.join(path),
                     _ => path.clone(),
                 };
-                let root = path
+                // The error names the path as the rule gives it, not joined to the rules
+                // file's directory: it reaches the API and the web UI.
+                let root = full
                     .canonicalize()
                     .map_err(|e| format!("map_local path {}: {e}", path.display()))?;
                 Self::MapLocal(MapLocal {
@@ -1030,10 +1032,33 @@ struct Status {
 pub struct Report {
     /// The current rules.
     pub rules: Vec<RuleConfig>,
-    /// The watched rules file, if any.
+    /// The watched rules file, if any. The path is kept whole here, but the JSON form (the
+    /// API and the web UI) carries only its file name: an absolute path would show the
+    /// home directory.
+    #[serde(serialize_with = "serialize_file_name")]
     pub file: Option<PathBuf>,
     /// Why the last load of the file failed; the previous rules stay in force.
     pub error: Option<String>,
+}
+
+/// What the API shows of a file path: its last component, `rules.toml` for
+/// `/home/me/proxy/rules.toml`. A path without one (`/`, `..`) shows a placeholder, never the
+/// path.
+#[must_use]
+pub(crate) fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(|| "(file)".to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "serde's `serialize_with` passes the field by reference"
+)]
+fn serialize_file_name<S: serde::Serializer>(
+    file: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    file.as_deref().map(file_name).serialize(serializer)
 }
 
 impl Rules {

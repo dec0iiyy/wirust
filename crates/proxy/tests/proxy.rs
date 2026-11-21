@@ -25,6 +25,8 @@ async fn exchange_over(alpn: &[u8], version: &str) -> TestResult {
     assert_eq!(record.url, format!("https://localhost:{port}/echo"));
     assert_eq!(record.status, Some(200));
     assert_eq!(record.client_version, version);
+    assert_eq!(record.upstream_version.as_deref(), Some(version));
+    assert_eq!(record.protocol(), version, "both legs agree: one name");
     assert!(
         record
             .request_headers
@@ -59,6 +61,35 @@ async fn http1_exchange_is_forwarded_and_logged() -> TestResult {
 #[tokio::test]
 async fn http2_exchange_is_forwarded_and_logged() -> TestResult {
     exchange_over(b"h2", "h2").await
+}
+
+/// Regression: the log line showed the server leg (`http/1.1`) while the web UI showed the
+/// client leg (`h2`) for the same flow. Both now come from `Exchange::protocol`.
+#[tokio::test]
+async fn an_h2_client_of_an_http1_only_server_shows_both_legs() -> TestResult {
+    let certs = upstream_certs()?;
+    let port = https_server_with_alpn(&certs, &[b"http/1.1"]).await?;
+    let mut proxy = start_proxy(&certs.ca, 1024).await?;
+    let (status, _) = request(&proxy, port, b"h2", "/x", b"").await?;
+    assert_eq!(status, StatusCode::OK);
+    let record = next_exchange(&mut proxy.events).await?;
+    assert_eq!(record.client_version, "h2", "what the client spoke");
+    assert_eq!(record.upstream_version.as_deref(), Some("http/1.1"));
+    assert_eq!(record.protocol(), "h2→http/1.1");
+    let line = Event::Exchange(Box::new(record)).to_string();
+    assert!(line.contains("  h2→http/1.1  "), "{line}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_http1_client_of_an_http1_only_server_is_http1_on_both_legs() -> TestResult {
+    let certs = upstream_certs()?;
+    let port = https_server_with_alpn(&certs, &[b"http/1.1"]).await?;
+    let mut proxy = start_proxy(&certs.ca, 1024).await?;
+    request(&proxy, port, b"http/1.1", "/x", b"").await?;
+    let record = next_exchange(&mut proxy.events).await?;
+    assert_eq!(record.protocol(), "http/1.1");
+    Ok(())
 }
 
 #[tokio::test]
@@ -126,6 +157,7 @@ async fn plain_http_absolute_form_is_logged() -> TestResult {
         (url.as_str(), Some(200))
     );
     assert!(record.tls.is_none());
+    assert_eq!(record.protocol(), "http/1.1");
     Ok(())
 }
 

@@ -8,11 +8,15 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
 
 ## What it shows
 
-- **Flow list**: number, time, method, host, path, status, client-leg protocol (`h2`,
-  `http/1.1`), response size, duration, and the client name matched from the TLS
-  fingerprint (`curl 8.7.1`). A row appears when the request starts (grey, `pending`) and
-  fills in when it ends. Status is coloured by class and always written out as text. TLS
-  handshake failures are red rows with the reason; tunnels say `tunnel`.
+- **Flow list**: number, time, method, host, path, status, protocol, response size,
+  duration, and the client name matched from the TLS fingerprint (`curl 8.7.1`), or its
+  JA4 when no known client matches. The protocol is the client leg (`h2`, `http/1.1`), and
+  when the server leg differs it follows an arrow (`h2→http/1.1`: an HTTP/2 client whose
+  server speaks HTTP/1.1); the terminal log prints the same text. A row appears when the
+  request starts (grey, `pending`) and fills in when it ends. Status is coloured by class
+  and always written out as text. TLS handshake failures are red rows with the reason;
+  tunnels say `tunnel`, and a TLS tunnel relayed by `--passthrough` shows the client from
+  its ClientHello like a decrypted flow does.
 - Up to the store's 5000 flows stay smooth: only the visible rows are in the DOM.
   **Follow** keeps the newest row in view; scrolling up turns it off, scrolling to the
   bottom turns it on. **Clear** hides the flows loaded so far, in this page only (the
@@ -77,7 +81,8 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
     download, total). Connect and TLS are shown only when the exchange opened the server
     connection. A TLS failure shows the reason and what usually causes it.
   - Client TLS: the matched client, JA4 and JA3 hash (with copy buttons), TLS version,
-    SNI, ALPN. This is how the app's own TLS stack looks to servers.
+    SNI, ALPN (for a passthrough tunnel, the ALPN protocols the client offered). This is
+    how the app's own TLS stack looks to servers.
   - Request / Response: headers with copy buttons, then the body by content type: JSON as
     a collapsible tree with search, form-urlencoded as a table, text as monospace, images
     as a preview, everything else as a hex dump (first 64 KB). Compressed bodies
@@ -142,6 +147,8 @@ The fragment may also carry `flow=ID`, `tab=overview|tls|request|response`, `q=F
 `{"name", "version", "proxy_addr", "magic_host", "ca_fingerprint_sha256", "rules_file",
 "session_file", "listen_is_loopback"}`; the fingerprint is the SHA-256 of the CA
 certificate's DER as colon-separated upper-case hex, as certificate viewers show it.
+`rules_file` and `session_file` are file names only (`rules.toml`), never the path as
+typed, so an absolute path does not show the home directory.
 
 ## Rules for contributors
 

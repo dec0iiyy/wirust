@@ -187,7 +187,7 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 Commands: `connect`, `android setup|reset`, `ca path|show|install-help`, `export --har`,
 `import --har`, `view --session`, `replay --session --id N`. `wirust --help` lists every
-option.
+option; `wirust COMMAND --help` (such as `wirust ca --help`) shows one command's options.
 
 ## Documentation
 

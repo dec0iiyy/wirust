@@ -497,6 +497,49 @@ async fn breakpoints_publish_events_and_take_validated_edits() -> TestResult {
     Ok(())
 }
 
+/// Regression: the rules panel showed the rules file path as given, and an absolute path
+/// shows the home directory. The API and the UI show the file name only.
+#[tokio::test]
+async fn the_api_names_the_rules_file_without_its_directory() -> TestResult {
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("rules.toml");
+    write_rules(&path, BREAK_HEADERS)?;
+    let rules = Rules::from_file(&path)?;
+    let (_running, _, addr, token) = start_ui(&rules).await?;
+    let dir_text = dir.to_string_lossy().into_owned();
+    assert!(path.is_absolute(), "{path:?}");
+
+    let (status, report) = api(addr, &token, Method::GET, "/api/v1/rules", "").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["file"], "rules.toml", "{report}");
+    let (_, info) = api(addr, &token, Method::GET, "/api/v1/info", "").await?;
+    assert_eq!(info["rules_file"], "rules.toml", "{info}");
+
+    // A relative map_local path resolves against the rules file's directory; the error that
+    // reaches the client names the path as the rule gives it, not the joined one.
+    let missing = r#"{"rules":[{"name":"m","action":{"type":"map_local","path":"no-such-dir"}}]}"#;
+    let (status, error) = api(addr, &token, Method::PUT, "/api/v1/rules", missing).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let message = error["error"].as_str().unwrap_or_default();
+    assert!(message.contains("no-such-dir"), "{message}");
+
+    for (what, text) in [
+        ("report", report.to_string()),
+        ("info", info.to_string()),
+        ("error", message.to_owned()),
+    ] {
+        assert!(
+            !text.contains(&dir_text),
+            "{what} leaks the directory: {text}"
+        );
+    }
+    // The library keeps the whole path for the watcher.
+    assert_eq!(rules.report().file.as_deref(), Some(path.as_path()));
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_rules_api_lists_toggles_and_replaces_atomically() -> TestResult {
     let rules = rules_from(BREAK_HEADERS)?;

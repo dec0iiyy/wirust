@@ -4,6 +4,7 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use bytes::Bytes;
 use common::*;
@@ -98,13 +99,23 @@ impl Setup {
         method: Method,
         body: &str,
     ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.api_at("passthrough", method, body).await
+    }
+
+    /// A control plane request to `/api/v1/{route}`, answered as JSON.
+    async fn api_at(
+        &self,
+        route: &str,
+        method: Method,
+        body: &str,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
         let tcp = TcpStream::connect(self.api).await?;
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
         tokio::spawn(connection);
         let request = Request::builder()
             .method(method)
-            .uri("/api/v1/passthrough")
+            .uri(format!("/api/v1/{route}"))
             .header("host", self.api.to_string())
             .header("authorization", format!("Bearer {}", self.token))
             .body(Full::new(Bytes::from(body.to_owned())))?;
@@ -142,6 +153,45 @@ async fn a_passthrough_host_keeps_its_own_certificate_and_is_recorded() -> TestR
     assert_eq!(record.error, None);
     let line = Event::Tunnel(record).to_string();
     assert!(line.contains("TLS passthrough, sni localhost"), "{line}");
+    Ok(())
+}
+
+/// Regression: passthrough rows had an empty Client column in the web UI. The flow the UI
+/// reads (`GET /api/v1/flows/{id}`) must carry the same client facts a decrypted flow has;
+/// `ui/app.js` (`tlsOf`) turns them into the column.
+#[tokio::test]
+async fn the_passthrough_flow_the_ui_reads_names_the_client() -> TestResult {
+    let mut setup = start(&["localhost"], &[]).await?;
+    setup.direct_get().await?;
+    let record = setup.tunnel_record().await?;
+    // The store follows the bus on its own task: ask until it has the flow.
+    let route = format!("flows/{}", record.id);
+    let stored = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, stored) = setup.api_at(&route, Method::GET, "").await?;
+            if status == StatusCode::OK {
+                return anyhow::Ok(stored);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    let flow = &stored["flow"];
+    assert_eq!(flow["type"], "tunnel", "{stored}");
+    let tls = &flow["tls"];
+    assert_eq!(tls["sni"], "localhost", "{stored}");
+    assert_eq!(tls["alpn_offered"], serde_json::json!(["http/1.1"]));
+    assert!(
+        tls["ja4"]
+            .as_str()
+            .is_some_and(|ja4| ja4.starts_with("t13d")),
+        "{stored}"
+    );
+    assert_eq!(tls["ja3_hash"].as_str().map(str::len), Some(32), "{stored}");
+    assert!(
+        tls.get("known_client").is_some(),
+        "the known client is named, or null when the JA4 is not known: {stored}"
+    );
     Ok(())
 }
 

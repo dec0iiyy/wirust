@@ -132,7 +132,7 @@ limited to 1 MiB.
 
 | Route | Does |
 |---|---|
-| `GET /api/v1/rules` | `{"rules": [...], "file": path or null, "error": last load error or null}` |
+| `GET /api/v1/rules` | `{"rules": [...], "file": file name or null, "error": last load error or null}`; `file` is the name only (`rules.toml`), not the path given to `--rules` |
 | `PUT /api/v1/rules` | replaces the whole set from `{"rules": [...]}` (the TOML shape in JSON); `400 {"error"}` leaves the set unchanged. Exchanges in flight keep the set they started with. The file, when watched, wins again on its next change. |
 | `POST /api/v1/rules/{name}/toggle` | flips `enabled`; `{"name", "enabled"}`, `404` for no such rule |
 | `GET /api/v1/pauses` | pending pauses: `[{"id", "flow_id", "phase"}]` |
