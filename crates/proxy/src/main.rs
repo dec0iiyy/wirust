@@ -16,10 +16,13 @@ use wirust::ca::Ca;
 use wirust::control::ControlPlane;
 use wirust::events::{DEFAULT_MAX_FLOWS, FlowEvent};
 use wirust::intercept::{BlockHost, DEFAULT_PAUSE_TIMEOUT, HeaderRules};
+use wirust::oscmd::{Platform, SystemRunner};
 use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
 use wirust::rules::Rules;
 use wirust::session;
+use wirust::sysproxy::{self, Enabled, SystemProxy};
+use wirust::trust::{self, CaTrust, TrustStatus};
 use wirust::upstream_proxy::{Bypass, Kind as UpstreamProxyKind, UpstreamProxy};
 use wirust::ws::{self, DEFAULT_WS_BODY_LIMIT, DEFAULT_WS_MAX_MESSAGES, WsLimits};
 use wirust::{Config, DEFAULT_BODY_LIMIT, MAGIC_HOST, NAME, Proxy, RemoteAccess, UpstreamTls};
@@ -35,6 +38,10 @@ enum Command {
     CaPath(Option<PathBuf>),
     CaShow(Option<PathBuf>),
     CaInstallHelp(Option<PathBuf>),
+    /// `ca install|uninstall|status [--yes]`
+    CaTrust(CaTrustCommand, Option<PathBuf>, Confirm),
+    /// `system-proxy on|off|status [--port P]`
+    SystemProxy(SystemProxyCommand, Option<PathBuf>, u16),
     /// `export --har OUT [--session FILE] [--filter Q]`
     Export {
         har: PathBuf,
@@ -87,6 +94,38 @@ struct RunArgs {
     ws_log: WsLog,
     upstream_proxy: Option<UpstreamProxy>,
     upstream_bypass: Bypass,
+    system_proxy: SystemProxyFlag,
+    confirm: Confirm,
+}
+
+/// `ca install|uninstall|status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaTrustCommand {
+    Install,
+    Uninstall,
+    Status,
+}
+
+/// `system-proxy on|off|status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemProxyCommand {
+    On,
+    Off,
+    Status,
+}
+
+/// Whether the run points the system proxy at itself (`--system-proxy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemProxyFlag {
+    Off,
+    On,
+}
+
+/// Whether trust-store changes still ask (`--yes` skips the question).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    Ask,
+    Assumed,
 }
 
 /// Flags of `replay`.
@@ -139,6 +178,8 @@ Usage:
   {NAME} connect [--port P] [--lan-ip IP] [--allow-client IP|CIDR]... [run options]
   {NAME} android setup|reset [--serial S] [--port P] [--config-dir DIR]
   {NAME} ca path|show|install-help [--config-dir DIR]
+  {NAME} ca install|uninstall|status [--yes] [--config-dir DIR]
+  {NAME} system-proxy on|off|status [--port P] [--config-dir DIR]
   {NAME} export --har OUT.har [--session FILE] [--filter QUERY]   (no --session: JSON Lines on stdin)
   {NAME} import --har IN.har --session OUT.jsonl
   {NAME} view --session FILE [--filter QUERY]
@@ -152,6 +193,12 @@ Commands:
   android setup         over adb: reverse the port, set the device's proxy to 127.0.0.1:P,
                         copy the CA to its Download folder
   android reset         over adb: clear the device's proxy and the port reversal
+  ca install            trust the CA for the current user only (macOS login keychain, Windows
+                        user Root store; Linux: prints the commands); asks for `yes` first
+  ca uninstall          remove exactly that certificate, matched by its SHA-256 fingerprint
+  ca status             say whether the CA is trusted
+  system-proxy on       point this computer's system proxy at 127.0.0.1:P, saving the old
+                        settings first; `off` restores them, `status` shows them
   replay                send flow N of a session file again through a running proxy (--via),
                         as an ordinary client, and print the status line; see docs/replay.md
 
@@ -176,6 +223,9 @@ Options:
   --remove-header NAME  remove this header from every request sent to servers (repeatable)
   --block-host HOST     answer requests to HOST and its subdomains with 403 (repeatable)
   --android-cleanup     on exit, clear the adb device's proxy setting (android reset)
+  --system-proxy        point the system proxy at this proxy while it runs; restored on exit
+                        (Ctrl-C, SIGTERM, SIGHUP); after a crash, `system-proxy off` restores
+  --yes                 ca install/uninstall: do not ask for confirmation
   --port P              proxy port for connect and android (default {DEFAULT_PORT})
   --lan-ip IP           connect: the address to listen on, instead of the detected one
   --allow-client NET    connect: pre-approve this IP or CIDR (repeatable)
@@ -423,6 +473,8 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         ws_log: WsLog::Off,
         upstream_proxy: None,
         upstream_bypass: Bypass::default(),
+        system_proxy: SystemProxyFlag::Off,
+        confirm: Confirm::Ask,
     };
     let mut mobile = MobileArgs::default();
     let mut words = Vec::new();
@@ -528,6 +580,8 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                     .context("--ws-max-messages takes a count")?;
             }
             "--ws-log" => run.ws_log = WsLog::Lines,
+            "--system-proxy" => run.system_proxy = SystemProxyFlag::On,
+            "--yes" => run.confirm = Confirm::Assumed,
             flag if flag.starts_with('-') => bail!("unknown option {flag}; see --help"),
             word => words.push(word.to_owned()),
         }
@@ -544,6 +598,22 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         ["ca", "path"] => Ok(Command::CaPath(dir)),
         ["ca", "show"] => Ok(Command::CaShow(dir)),
         ["ca", "install-help"] => Ok(Command::CaInstallHelp(dir)),
+        ["ca", "install"] => Ok(Command::CaTrust(CaTrustCommand::Install, dir, run.confirm)),
+        ["ca", "uninstall"] => Ok(Command::CaTrust(
+            CaTrustCommand::Uninstall,
+            dir,
+            run.confirm,
+        )),
+        ["ca", "status"] => Ok(Command::CaTrust(CaTrustCommand::Status, dir, run.confirm)),
+        ["system-proxy", action] => {
+            let action = match action {
+                "on" => SystemProxyCommand::On,
+                "off" => SystemProxyCommand::Off,
+                "status" => SystemProxyCommand::Status,
+                _ => bail!("system-proxy takes on, off or status"),
+            };
+            Ok(Command::SystemProxy(action, dir, mobile.port()))
+        }
         ["export"] => Ok(Command::Export {
             har: run.har.context("export needs --har OUT.har")?,
             session: run.session,
@@ -633,6 +703,8 @@ fn execute(command: Command) -> anyhow::Result<()> {
             Ca::load_or_create(&dir)?;
             print!("{}", install_help(&Ca::cert_path(&dir)));
         }
+        Command::CaTrust(action, dir, confirm) => ca_trust(action, &config_dir(dir)?, confirm)?,
+        Command::SystemProxy(action, dir, port) => system_proxy(action, &config_dir(dir)?, port)?,
         Command::Run(args, mobile) => run(args, &mobile, None)?,
         Command::Connect(mut args, mobile) => {
             let ip = match mobile.lan_ip {
@@ -676,6 +748,114 @@ fn execute(command: Command) -> anyhow::Result<()> {
         } => replay(&session, &config_dir(dir)?, args)?,
     }
     Ok(())
+}
+
+/// `ca install|uninstall|status`: the CA in the current user's trust store.
+fn ca_trust(action: CaTrustCommand, dir: &std::path::Path, confirm: Confirm) -> anyhow::Result<()> {
+    let ca = Ca::load_or_create(dir)?;
+    let home = dirs::home_dir().context("the platform reports no home directory")?;
+    let trust = CaTrust::new(
+        SystemRunner,
+        Platform::current(),
+        (ca.path(), ca.cert_pem(), ca.cert_der()?),
+        &home,
+    );
+    let change = match action {
+        CaTrustCommand::Install => trust::Action::Install,
+        CaTrustCommand::Uninstall => trust::Action::Uninstall,
+        CaTrustCommand::Status => {
+            let status = match trust.status()? {
+                TrustStatus::Trusted => "trusted",
+                TrustStatus::NotTrusted => "not trusted",
+                TrustStatus::Unknown => "unknown (check your distribution's trust store)",
+            };
+            println!(
+                "{NAME} CA: {status}\nSHA-256 fingerprint: {}",
+                trust.fingerprint()
+            );
+            return Ok(());
+        }
+    };
+    let plan = trust.plan(change);
+    let confirmed = match confirm {
+        Confirm::Assumed => {
+            eprint!("{plan}");
+            true
+        }
+        Confirm::Ask => {
+            trust::confirm(&plan, &mut std::io::stdin().lock(), &mut std::io::stderr())?
+        }
+    };
+    anyhow::ensure!(confirmed, "cancelled; nothing changed");
+    let done = match change {
+        trust::Action::Install => trust.install()?,
+        trust::Action::Uninstall => trust.uninstall()?,
+    };
+    println!("{done}");
+    Ok(())
+}
+
+/// `system-proxy on|off|status`.
+fn system_proxy(
+    action: SystemProxyCommand,
+    dir: &std::path::Path,
+    port: u16,
+) -> anyhow::Result<()> {
+    let proxy = SystemProxy::new(SystemRunner, Platform::current(), dir);
+    match action {
+        SystemProxyCommand::On => {
+            let listen = SocketAddr::from(([127, 0, 0, 1], port));
+            match proxy.enable(listen)? {
+                Enabled::Changed(text) => println!(
+                    "{text}\nUndo with `{NAME} system-proxy off`; until then programs need the \
+                     proxy running on port {port}."
+                ),
+                Enabled::Manual(text) => print!("{text}"),
+            }
+        }
+        SystemProxyCommand::Off => {
+            if proxy.restore()? {
+                println!("restored the system proxy settings from before {NAME} changed them");
+            } else {
+                println!("nothing to restore: {NAME} has not changed the system proxy");
+            }
+        }
+        SystemProxyCommand::Status => print!("{}", proxy.status()?),
+    }
+    Ok(())
+}
+
+/// For `--system-proxy`: restores what a crashed run left, then points the system proxy at
+/// `listen`. Without the flag, only warns about a leftover state file.
+fn start_system_proxy(
+    flag: SystemProxyFlag,
+    dir: &std::path::Path,
+    listen: SocketAddr,
+) -> anyhow::Result<Option<sysproxy::Guard<SystemRunner>>> {
+    let proxy = SystemProxy::new(SystemRunner, Platform::current(), dir);
+    if flag == SystemProxyFlag::Off {
+        if proxy.has_saved_state() {
+            eprintln!(
+                "{NAME}: an earlier run left the system proxy pointing at it ({}); run `{NAME} \
+                 system-proxy off` to restore the old settings",
+                proxy.state_path().display()
+            );
+        }
+        return Ok(None);
+    }
+    if proxy.restore()? {
+        eprintln!("{NAME}: restored the system proxy settings an earlier run left behind");
+    }
+    match proxy.enable(listen)? {
+        Enabled::Changed(text) => {
+            eprintln!("{NAME}: {text}; restored on exit");
+            Ok(Some(sysproxy::Guard::new(proxy)))
+        }
+        Enabled::Manual(text) => {
+            eprint!("{text}");
+            Ok(None)
+        }
+    }
 }
 
 /// The `replay` command: one flow of a session file, through a running proxy.
@@ -807,8 +987,9 @@ fn run(
         ws: args.ws,
         upstream_proxy: args.upstream_proxy.take(),
         upstream_bypass: std::mem::take(&mut args.upstream_bypass),
-        ..Config::new(config_dir(args.config_dir)?)
+        ..Config::new(config_dir(args.config_dir.clone())?)
     };
+    let dir = config_dir(args.config_dir.clone())?;
     let rules = register_interceptors(
         &mut config,
         std::mem::take(&mut args.block_hosts),
@@ -844,6 +1025,8 @@ fn run(
             control.set_session_file(args.session.clone());
         }
         let local = proxy.local_addr()?;
+        // Dropped on every way out of this block, so an early error also restores it.
+        let system_proxy = start_system_proxy(args.system_proxy, &dir, local)?;
         let console = match pairing {
             Some((pairing, notices)) => {
                 let url = format!("http://{local}/");
@@ -866,8 +1049,17 @@ fn run(
         let control = control.map(|control| tokio::spawn(control.run()));
         let result = tokio::select! {
             result = proxy.run() => result,
-            _ = tokio::signal::ctrl_c() => Ok(()),
+            () = sysproxy::shutdown_signal() => Ok(()),
         };
+        if let Some(guard) = system_proxy {
+            match guard.restore() {
+                Ok(_) => eprintln!("{NAME}: restored the system proxy settings"),
+                Err(e) => eprintln!(
+                    "{NAME}: could not restore the system proxy ({e:#}); run `{NAME} \
+                     system-proxy off`"
+                ),
+            }
+        }
         printer.abort();
         if let Some(control) = control {
             control.abort();
@@ -1036,6 +1228,32 @@ mod tests {
             panic!("expected run");
         };
         assert!(run.session.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn parses_trust_and_system_proxy_commands() -> anyhow::Result<()> {
+        assert!(matches!(
+            parse(&args("ca install --yes"))?,
+            Command::CaTrust(CaTrustCommand::Install, None, Confirm::Assumed)
+        ));
+        assert!(matches!(
+            parse(&args("ca uninstall"))?,
+            Command::CaTrust(CaTrustCommand::Uninstall, None, Confirm::Ask)
+        ));
+        assert!(matches!(
+            parse(&args("system-proxy on --port 9000"))?,
+            Command::SystemProxy(SystemProxyCommand::On, None, 9000)
+        ));
+        assert!(matches!(
+            parse(&args("system-proxy status"))?,
+            Command::SystemProxy(SystemProxyCommand::Status, None, DEFAULT_PORT)
+        ));
+        assert!(parse(&args("system-proxy maybe")).is_err());
+        let Command::Run(run, _) = parse(&args("--system-proxy"))? else {
+            panic!("expected run");
+        };
+        assert_eq!(run.system_proxy, SystemProxyFlag::On);
         Ok(())
     }
 
