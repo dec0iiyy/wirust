@@ -1,0 +1,16 @@
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+
+fun main() {
+    val client = OkHttpClient()
+    val request = Request.Builder()
+        .url("https://api.test/search?q=a%20b&x=1&y=%7B%7D")
+        .method("POST", ByteArray(0).toRequestBody())
+        .addHeader("user-agent", "wirust-test/1.0")
+        .build()
+    client.newCall(request).execute().use { response ->
+        println(response.code)
+        println(response.body?.string())
+    }
+}

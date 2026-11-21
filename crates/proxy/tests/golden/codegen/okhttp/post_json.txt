@@ -1,0 +1,18 @@
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+
+fun main() {
+    val client = OkHttpClient()
+    val body = "{\"user\":\"zoe\",\"price\":\"\$5\",\"say\":\"a \\\"b\\\"\\n\"}".toByteArray().toRequestBody("application/json".toMediaType())
+    val request = Request.Builder()
+        .url("https://api.test/items")
+        .method("POST", body)
+        .addHeader("user-agent", "wirust-test/1.0")
+        .build()
+    client.newCall(request).execute().use { response ->
+        println(response.code)
+        println(response.body?.string())
+    }
+}

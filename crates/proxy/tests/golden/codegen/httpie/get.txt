@@ -1,0 +1,6 @@
+http \
+  --ignore-stdin \
+  GET \
+  https://api.test/users/42 \
+  user-agent:wirust-test/1.0 \
+  accept:application/json

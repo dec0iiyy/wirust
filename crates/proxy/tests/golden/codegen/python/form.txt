@@ -1,0 +1,12 @@
+import requests
+
+response = requests.post(
+    "https://api.test/login",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "content-type": "application/x-www-form-urlencoded",
+    },
+    data="a=1&b=hello+world&c=%7B%7D",
+)
+print(response.status_code)
+print(response.text)

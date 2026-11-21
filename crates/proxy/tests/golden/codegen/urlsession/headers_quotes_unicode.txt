@@ -1,0 +1,22 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+var request = URLRequest(url: URL(string: "https://api.test/h")!)
+request.httpMethod = "GET"
+request.setValue("wirust-test/1.0", forHTTPHeaderField: "user-agent")
+request.setValue(#"say "hi" it's"#, forHTTPHeaderField: "x-quote")
+request.setValue("Zo\u{c3}\u{ab} \u{c3}\u{b1} \u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}", forHTTPHeaderField: "x-name") // sent as UTF-8 bytes
+request.setValue(#"C:\dir\new"#, forHTTPHeaderField: "x-back")
+request.setValue("$HOME ${x} `id`", forHTTPHeaderField: "x-dollar")
+request.setValue("a=1; b=2", forHTTPHeaderField: "cookie")
+
+let done = DispatchSemaphore(value: 0)
+URLSession.shared.dataTask(with: request) { data, response, error in
+    if let http = response as? HTTPURLResponse { print(http.statusCode) }
+    if let data = data { print(String(decoding: data, as: UTF8.self)) }
+    if let error = error { print(error) }
+    done.signal()
+}.resume()
+done.wait()

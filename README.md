@@ -121,7 +121,7 @@ profile. Limits, from the platforms' documentation:
 |---|---|
 | HTTPS interception | HTTP/1.1 and HTTP/2 through CONNECT; plain `http://` too; server certificates checked against the Mozilla roots |
 | Client TLS fingerprint | JA4, JA3 hash, TLS version, SNI, ALPN and the matched known client; the JA4 also for failed handshakes and passthrough tunnels |
-| Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL; [docs/ui.md](docs/ui.md) |
+| Web UI | live flow list, detail tabs, keyboard navigation, copy as cURL, Python, fetch, OkHttp, URLSession, HTTPie or PowerShell; [docs/ui.md](docs/ui.md) |
 | Search | `host:` `method:` `status:5xx` `type:json` and more, in the UI, `view` and `export`; [docs/interchange.md](docs/interchange.md) |
 | Rules | block, status, map local, map remote, header and body rewrite (regex, JSON path), delay, throttle; TOML file reloaded on change, editable in the UI; [docs/rules.md](docs/rules.md) |
 | Breakpoints | pause matching requests or responses in the UI; see and edit method, URL, status, headers and text body, then resume or abort |

@@ -1,0 +1,11 @@
+import requests
+
+response = requests.get(
+    "https://api.test/users/42",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "accept": "application/json",
+    },
+)
+print(response.status_code)
+print(response.text)

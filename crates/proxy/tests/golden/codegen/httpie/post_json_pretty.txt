@@ -1,0 +1,13 @@
+http \
+  --raw \
+  '{
+  "name": "Zoë",
+  "tags": ["a", "b"],
+  "nested": {
+    "ok": true
+  }
+}' \
+  PUT \
+  https://api.test/items/7 \
+  user-agent:wirust-test/1.0 \
+  content-type:application/json

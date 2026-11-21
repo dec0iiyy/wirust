@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use crate::flow::Exchange;
 
 /// Request headers cURL must not repeat: hop-by-hop headers and those it computes itself.
-const SKIPPED: &[&str] = &[
+pub(crate) const SKIPPED: &[&str] = &[
     "connection",
     "keep-alive",
     "proxy-connection",
@@ -153,7 +153,7 @@ fn render(plan: &Plan, program: &str) -> String {
 }
 
 /// `text` as one `sh` word.
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let plain = !text.is_empty()
         && text
             .bytes()

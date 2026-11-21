@@ -1,0 +1,7 @@
+http \
+  --raw \
+  '{"user":"zoe","price":"$5","say":"a \"b\"\n"}' \
+  POST \
+  https://api.test/items \
+  user-agent:wirust-test/1.0 \
+  content-type:application/json

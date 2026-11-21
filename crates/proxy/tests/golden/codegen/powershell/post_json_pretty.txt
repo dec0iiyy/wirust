@@ -1,0 +1,12 @@
+$body = @'
+{
+  "name": "Zoë",
+  "tags": ["a", "b"],
+  "nested": {
+    "ok": true
+  }
+}
+'@
+$response = Invoke-WebRequest -UseBasicParsing -Method 'PUT' -Uri 'https://api.test/items/7' -ContentType 'application/json' -UserAgent 'wirust-test/1.0' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+$response.StatusCode
+$response.Content

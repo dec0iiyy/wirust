@@ -1,0 +1,18 @@
+import requests
+
+response = requests.put(
+    "https://api.test/items/7",
+    headers={
+        "user-agent": "wirust-test/1.0",
+        "content-type": "application/json",
+    },
+    data="""{
+  "name": "Zoë",
+  "tags": ["a", "b"],
+  "nested": {
+    "ok": true
+  }
+}""".encode("utf-8"),
+)
+print(response.status_code)
+print(response.text)

@@ -1,0 +1,15 @@
+// Browsers ignore these headers (Node sends them): user-agent, cookie
+fetch("https://api.test/h", {
+  method: "GET",
+  headers: {
+    "user-agent": "wirust-test/1.0",
+    "x-quote": "say \"hi\" it's",
+    "x-name": "ZoÃ« Ã± æ\x97¥æ\x9c¬" /* sent as UTF-8 bytes */,
+    "x-back": "C:\\dir\\new",
+    "x-dollar": "$HOME ${x} `id`",
+    "cookie": "a=1; b=2",
+  },
+}).then(async (response) => {
+  console.log(response.status);
+  console.log(await response.text());
+});

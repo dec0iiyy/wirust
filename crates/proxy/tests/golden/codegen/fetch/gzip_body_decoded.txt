@@ -1,0 +1,13 @@
+// Browsers ignore these headers (Node sends them): user-agent
+fetch("https://api.test/upload", {
+  method: "POST",
+  headers: {
+    "user-agent": "wirust-test/1.0",
+    "content-type": "text/plain; charset=utf-8",
+  },
+  body: `café	tab
+ok`,
+}).then(async (response) => {
+  console.log(response.status);
+  console.log(await response.text());
+});

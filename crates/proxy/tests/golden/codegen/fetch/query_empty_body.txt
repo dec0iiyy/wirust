@@ -1,0 +1,10 @@
+// Browsers ignore these headers (Node sends them): user-agent
+fetch("https://api.test/search?q=a%20b&x=1&y=%7B%7D", {
+  method: "POST",
+  headers: {
+    "user-agent": "wirust-test/1.0",
+  },
+}).then(async (response) => {
+  console.log(response.status);
+  console.log(await response.text());
+});

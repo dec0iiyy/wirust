@@ -1,0 +1,20 @@
+import okhttp3.OkHttpClient
+import okhttp3.Request
+
+fun main() {
+    val client = OkHttpClient()
+    val request = Request.Builder()
+        .url("https://api.test/h")
+        .get()
+        .addHeader("user-agent", "wirust-test/1.0")
+        .addHeader("x-quote", """say "hi" it's""")
+        .addUnsafeNonAscii("x-name", "Zoë ñ 日本")
+        .addHeader("x-back", "C:\\dir\\new")
+        .addHeader("x-dollar", "\$HOME \${x} `id`")
+        .addHeader("cookie", "a=1; b=2")
+        .build()
+    client.newCall(request).execute().use { response ->
+        println(response.code)
+        println(response.body?.string())
+    }
+}

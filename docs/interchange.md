@@ -1,4 +1,4 @@
-# Interchange: HAR, sessions, search, cURL
+# Interchange: HAR, sessions, search, cURL, code
 
 ## Privacy first
 
@@ -140,6 +140,42 @@ type:json time:>500ms OR size:>1m
 Limits: a query is at most 4096 bytes and nests parentheses and negations at most 32 deep;
 beyond that, and on any syntax error, the API answers 400 with
 `{"error": "query error at position N: expected ..."}`.
+
+## Code export
+
+`GET /api/v1/flows/{id}/code?lang=LANG` answers `text/plain; charset=utf-8` with a complete
+snippet, imports included, that sends the request again. `LANG` is `python` (requests),
+`fetch` (JavaScript, browser or Node 18+), `okhttp` (Kotlin), `urlsession` (Swift), `httpie`
+or `powershell` (`Invoke-WebRequest`). An unknown or missing `lang` is a 400 that lists the
+names; an unknown flow, or one that is not an HTTP exchange, is a 404; a flow still running
+is a 409. The route needs the control plane's token like the rest of the API, and the snippet
+holds only what the flow recorded, never the token.
+
+- method, URL, headers in the original order and body of the captured request. Left out are
+  the HTTP/2 pseudo headers, hop-by-hop headers, `Content-Length`, `Accept-Encoding` (each
+  library asks for the encodings it can decode), a `Host` equal to the URL's host, and
+  `Content-Encoding` when the stored body is decoded, so the snippet sends the decoded body.
+  A header that was sent twice is joined into one (`; ` for `Cookie`, `, ` otherwise);
+- text bodies are string literals escaped for the language (quotes, backslashes, newlines,
+  tabs, control and invisible characters, `$` in Kotlin, backticks and `$` in PowerShell).
+  A raw or multi-line literal is used instead where the language has one and the text is safe
+  in it (Python `r'...'` and triple quotes, JavaScript template literals, Kotlin raw strings,
+  Swift `#"..."#`, PowerShell single-quoted and here-strings), so JSON stays readable;
+- binary bodies are Base64 text decoded in the code (`base64.b64decode`, `atob`,
+  `Base64.getDecoder()`, `Data(base64Encoded:)`, `FromBase64String`, `base64 -d` for HTTPie);
+- text with characters outside ASCII is sent as UTF-8: Python and PowerShell encode the string
+  explicitly, OkHttp takes the bytes. A header value outside ASCII is sent as its UTF-8 bytes
+  too (bytes in Python, `addUnsafeNonAscii` in OkHttp, byte-valued characters with a comment in
+  JavaScript and Swift);
+- OkHttp puts `Content-Type` in the request body's media type, because OkHttp overrides the
+  header with it; the body is a byte array so OkHttp adds no charset;
+- the snippets leave every other setting at the library's default, redirects included;
+- a cut body adds a comment line saying so.
+
+The tests run the Python (with `requests`), JavaScript and Swift snippets against a local
+server and compare the method, target, headers and body the server read (Swift for four of
+the eight cases, since each one is compiled; a language whose tool is missing is skipped).
+The other three languages are covered by golden files only and were not run.
 
 ## cURL export
 

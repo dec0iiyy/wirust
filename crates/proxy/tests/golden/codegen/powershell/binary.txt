@@ -1,0 +1,4 @@
+$body = [System.Convert]::FromBase64String('/wBhAP8=')
+$response = Invoke-WebRequest -UseBasicParsing -Method 'PUT' -Uri 'https://api.test/blob' -ContentType 'application/octet-stream' -UserAgent 'wirust-test/1.0' -Body $body
+$response.StatusCode
+$response.Content

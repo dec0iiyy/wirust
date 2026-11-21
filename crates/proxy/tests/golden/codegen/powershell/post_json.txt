@@ -1,0 +1,4 @@
+$body = '{"user":"zoe","price":"$5","say":"a \"b\"\n"}'
+$response = Invoke-WebRequest -UseBasicParsing -Method 'POST' -Uri 'https://api.test/items' -ContentType 'application/json' -UserAgent 'wirust-test/1.0' -Body $body
+$response.StatusCode
+$response.Content

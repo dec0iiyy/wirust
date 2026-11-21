@@ -13,6 +13,7 @@ pub mod body;
 pub mod ca;
 pub mod certs;
 mod clock;
+pub mod codegen;
 pub mod control;
 pub mod curl;
 pub mod decode;

@@ -1,0 +1,7 @@
+$body = @'
+café	tab
+ok
+'@
+$response = Invoke-WebRequest -UseBasicParsing -Method 'POST' -Uri 'https://api.test/upload' -ContentType 'text/plain; charset=utf-8' -UserAgent 'wirust-test/1.0' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+$response.StatusCode
+$response.Content
