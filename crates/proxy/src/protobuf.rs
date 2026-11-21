@@ -43,6 +43,16 @@ pub struct Field {
     pub field: u32,
     /// `varint`, `i64`, `len` or `i32`, as the protobuf encoding guide names them.
     pub wire: &'static str,
+    /// The field name, when a `.proto` schema decoded the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The declared type, such as `int64`, `repeated pkg.Item` or `map<string, int32>`,
+    /// when a schema decoded the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proto: Option<String>,
+    /// The oneof the field belongs to, when a schema says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oneof: Option<String>,
     /// The value, with how it was interpreted.
     #[serde(flatten)]
     pub value: Value,
@@ -90,6 +100,29 @@ pub enum Value {
         values: Vec<String>,
         /// Always `true`: the wire format cannot tell packed varints from bytes.
         guess: bool,
+    },
+    /// A `bool` field (schema decoding only).
+    Bool {
+        /// The value.
+        value: bool,
+    },
+    /// A numeric field (schema decoding only), as a decimal string.
+    Number {
+        /// The value.
+        value: String,
+    },
+    /// An enum field (schema decoding only).
+    Enum {
+        /// The number on the wire.
+        value: i32,
+        /// Its name in the schema; `None` for a number the enum does not list. Not `name`,
+        /// which the field's own name takes in the flattened JSON.
+        symbol: Option<String>,
+    },
+    /// A `google.protobuf.Struct`, `Value` or `ListValue` (schema decoding only).
+    Json {
+        /// The JSON it stands for.
+        value: serde_json::Value,
     },
     /// A length-delimited field that is none of the above.
     Bytes {
@@ -236,6 +269,9 @@ fn parse(data: &[u8], depth: usize, budget: &mut usize) -> (Vec<Field>, Option<F
         fields.push(Field {
             field: number,
             wire,
+            name: None,
+            proto: None,
+            oneof: None,
             value,
         });
     }
@@ -266,6 +302,11 @@ fn guess(bytes: &[u8], depth: usize, budget: &mut usize) -> Value {
             guess: true,
         };
     }
+    bytes_value(bytes)
+}
+
+/// An opaque field: its size and its first [`MAX_BYTES_SHOWN`] bytes, base64.
+pub(crate) fn bytes_value(bytes: &[u8]) -> Value {
     let shown = &bytes[..bytes.len().min(MAX_BYTES_SHOWN)];
     Value::Bytes {
         size: bytes.len(),

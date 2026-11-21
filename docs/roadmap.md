@@ -10,9 +10,9 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
 4. Passthrough patterns in the web UI (replay and compose are there).
 5. WebSocket: `permessage-deflate` decoding instead of stripping, a `ws:` search field,
    messages in session files, sending and editing messages.
-6. gRPC with `.proto` files or server reflection (field names), and inflating compressed
-   messages (the body decoder in `decode.rs` could be reused); today messages are decoded
-   schema-less and compressed ones only listed.
+6. gRPC schemas from server reflection and compiled descriptor sets; `.proto` files
+   (`--proto`, with field names, enums and well-known types) and inflating compressed
+   messages are done (docs/grpc.md).
 7. WebSocket over HTTP/2 (RFC 8441 extended CONNECT).
 8. SOCKS5 listener for clients that cannot use an HTTP proxy.
 9. Replay of a body that was compressed on the wire sends it as identity; re-encoding it would

@@ -4,16 +4,28 @@
 //! the length-prefixed gRPC messages (compressed flag, 4-byte big-endian length), decodes
 //! each with the schema-less [`protobuf`](crate::protobuf) decoder, and reads `grpc-status`
 //! and `grpc-message` from the HTTP/2 trailers, a trailers-only response head, or the
-//! trailer frame of a gRPC-Web body. Compressed messages are reported, not inflated: no
-//! decompressor is linked. Works on the kept part of the bodies (`--body-limit`).
+//! trailer frame of a gRPC-Web body. Compressed messages are inflated when the direction's
+//! `grpc-encoding` names a coding [`decode`](crate::decode) undoes (gzip, deflate, also br
+//! and zstd), within [`MAX_INFLATED`] bytes. With `.proto` schemas loaded
+//! ([`Schemas`]), messages of a known `/pkg.Service/Method` are decoded with its request
+//! and response types, falling back to the schema-less tree when that fails. Works on the
+//! kept part of the bodies (`--body-limit`).
+
+use std::borrow::Cow;
 
 use base64::Engine as _;
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use serde::Serialize;
 
+use prost_reflect::MessageDescriptor;
+
 use crate::flow::{BodyRecord, Exchange};
 use crate::protobuf::{self, Decoded};
+use crate::schema::Schemas;
+
+/// Bytes one compressed message may inflate to; the rest is cut and reported.
+pub const MAX_INFLATED: usize = 4 << 20;
 
 /// Messages listed per direction; more set [`Stream::truncated`].
 pub const MAX_MESSAGES: usize = 64;
@@ -77,6 +89,11 @@ pub struct Message {
     pub compressed: bool,
     /// The length the frame declared, or the body size for bare protobuf.
     pub size: u64,
+    /// The size after inflating a compressed payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inflated: Option<usize>,
+    /// The message type the payload was decoded with; `null` for the schema-less tree.
+    pub schema: Option<String>,
     /// Why the payload is not (fully) decoded, when it is not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -95,6 +112,12 @@ pub struct Stream {
     pub error: Option<String>,
     /// Whether messages are missing: the body was cut by the limit, or a cap was hit.
     pub truncated: bool,
+    /// The message type the schemas give this direction; `null` when none applies.
+    pub schema: Option<String>,
+    /// Why the schema-less tree is shown although schemas are loaded, such as
+    /// `schema-less: method not found`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_note: Option<String>,
 }
 
 /// A decoded gRPC or protobuf exchange.
@@ -131,9 +154,76 @@ pub struct Call {
     pub truncated: bool,
 }
 
-/// Decodes the bodies of `exchange`, or `None` when it is not gRPC or protobuf.
+/// How to read the messages of one direction.
+#[derive(Debug, Clone, Default)]
+struct Plan {
+    /// The direction's `grpc-encoding`, lowercase, when not `identity`.
+    coding: Option<String>,
+    /// The type to decode with, when the schemas give one.
+    schema: Option<MessageDescriptor>,
+    /// Why there is no type although schemas are loaded.
+    note: Option<String>,
+}
+
+/// Decodes the bodies of `exchange` schema-less, or `None` when it is not gRPC or protobuf.
 #[must_use]
 pub fn decode_exchange(exchange: &Exchange) -> Option<Call> {
+    decode_exchange_with(exchange, None)
+}
+
+/// The request and response plans: codings from each side's `grpc-encoding`, types from
+/// the method (gRPC) or the `--proto-message` hint (bare protobuf).
+fn plans(
+    exchange: &Exchange,
+    kind: Kind,
+    path: Option<(&str, &str)>,
+    schemas: Option<&Schemas>,
+) -> (Plan, Plan) {
+    let coding = |headers: &[(String, String)]| {
+        header(headers, "grpc-encoding")
+            .map(|c| c.trim().to_ascii_lowercase())
+            .filter(|c| !c.is_empty() && c != "identity")
+    };
+    let mut request = Plan {
+        coding: coding(&exchange.request_headers),
+        ..Plan::default()
+    };
+    let mut response = Plan {
+        coding: coding(&exchange.response_headers),
+        ..Plan::default()
+    };
+    let Some((schemas, compiled)) = schemas.and_then(|s| Some((s, s.current()?))) else {
+        return (request, response);
+    };
+    let found = if kind == Kind::Protobuf {
+        match schemas.message_hint() {
+            Some(hint) => compiled
+                .message(hint)
+                .map(|m| (m.clone(), m))
+                .ok_or_else(|| format!("schema-less: message {hint} not found")),
+            None => Err("schema-less: no --proto-message given".to_owned()),
+        }
+    } else {
+        path.and_then(|(service, method)| compiled.method(service, method))
+            .ok_or_else(|| "schema-less: method not found".to_owned())
+    };
+    match found {
+        Ok((input, output)) => {
+            request.schema = Some(input);
+            response.schema = Some(output);
+        }
+        Err(note) => {
+            request.note = Some(note.clone());
+            response.note = Some(note);
+        }
+    }
+    (request, response)
+}
+
+/// Decodes the bodies of `exchange`, with `schemas` when given, or `None` when it is not
+/// gRPC or protobuf.
+#[must_use]
+pub fn decode_exchange_with(exchange: &Exchange, schemas: Option<&Schemas>) -> Option<Call> {
     let kind = Kind::of(exchange)?;
     let path = exchange
         .url
@@ -150,11 +240,13 @@ pub fn decode_exchange(exchange: &Exchange) -> Option<Call> {
     let encoding = header(&exchange.request_headers, "grpc-encoding")
         .or_else(|| header(&exchange.response_headers, "grpc-encoding"))
         .map(str::to_owned);
-    let (request, _) = body_stream(kind, &exchange.request_body);
+    let path = service.as_deref().zip(method.as_deref());
+    let (request_plan, response_plan) = plans(exchange, kind, path, schemas);
+    let (request, _) = body_stream(kind, &exchange.request_body, &request_plan);
     let (response, web_trailers) = exchange
         .response_body
         .as_ref()
-        .map(|body| body_stream(kind, body))
+        .map(|body| body_stream(kind, body, &response_plan))
         .unzip();
     let web_trailers = web_trailers.unwrap_or_default();
     let trailers = if exchange.response_trailers.is_empty() {
@@ -204,7 +296,14 @@ fn body_bytes(body: &BodyRecord) -> Result<Vec<u8>, String> {
 }
 
 /// The messages of one body, and the trailers of a gRPC-Web trailer frame.
-fn body_stream(kind: Kind, body: &BodyRecord) -> (Stream, Vec<(String, String)>) {
+fn body_stream(kind: Kind, body: &BodyRecord, plan: &Plan) -> (Stream, Vec<(String, String)>) {
+    let (mut stream, trailers) = raw_body_stream(kind, body, plan);
+    stream.schema = plan.schema.as_ref().map(|m| m.full_name().to_owned());
+    stream.schema_note.clone_from(&plan.note);
+    (stream, trailers)
+}
+
+fn raw_body_stream(kind: Kind, body: &BodyRecord, plan: &Plan) -> (Stream, Vec<(String, String)>) {
     let failed = |error| {
         let stream = Stream {
             error: Some(error),
@@ -229,18 +328,69 @@ fn body_stream(kind: Kind, body: &BodyRecord) -> (Stream, Vec<(String, String)>)
             ..Stream::default()
         };
         if !data.is_empty() {
-            let note = body.truncated.then(|| "cut by the body limit".to_owned());
+            let mut budget = protobuf::MAX_STEPS;
+            let (schema, failure, decoded) = payload(&data, plan, &mut budget);
+            let cut = body.truncated.then(|| "cut by the body limit".to_owned());
             stream.messages.push(Message {
                 index: 0,
                 compressed: false,
                 size: body.size,
-                note,
-                decoded: Some(protobuf::decode(&data)),
+                inflated: None,
+                schema,
+                note: join_notes(cut, failure),
+                decoded: Some(decoded),
             });
         }
         return (stream, Vec::new());
     }
-    frames(&data, body.truncated)
+    frames(&data, body.truncated, plan)
+}
+
+/// Decodes one payload with the plan's type, else schema-less. Returns the type used, why
+/// the schema failed (when it did) and the tree.
+fn payload(
+    data: &[u8],
+    plan: &Plan,
+    budget: &mut usize,
+) -> (Option<String>, Option<String>, Decoded) {
+    if let Some(desc) = &plan.schema {
+        match crate::schema::decode(desc, data, budget) {
+            Ok(decoded) => return (Some(desc.full_name().to_owned()), None, decoded),
+            Err(e) => {
+                let note = format!("schema-less: not a valid {}: {e}", desc.full_name());
+                return (None, Some(note), protobuf::decode_within(data, budget));
+            }
+        }
+    }
+    (None, None, protobuf::decode_within(data, budget))
+}
+
+fn join_notes(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Inflates a compressed payload with the plan's coding: the bytes and a note, or why not.
+fn inflate(data: &[u8], plan: &Plan, cut: bool) -> Result<(Vec<u8>, Option<String>), String> {
+    let Some(coding) = &plan.coding else {
+        return Err("compressed, not decoded".to_owned());
+    };
+    if crate::decode::Coding::from_token(coding).is_none() {
+        return Err(format!("compressed with {coding}, not decoded"));
+    }
+    let inflated = crate::decode::decode(data, std::slice::from_ref(coding), MAX_INFLATED, cut)
+        .map_err(|e| format!("{e}, not decoded"))?;
+    let note = match inflated.cut {
+        None => None,
+        Some(crate::decode::Cut::Input) => Some("cut by the body limit".to_owned()),
+        Some(_) => Some(format!(
+            "inflated output cut at {} bytes",
+            inflated.data.len()
+        )),
+    };
+    Ok((inflated.data, note))
 }
 
 /// Decodes gRPC-Web text: base64, possibly several padded chunks back to back. A body cut
@@ -273,7 +423,7 @@ fn web_text(text: &[u8], cut: bool) -> Result<Vec<u8>, base64::DecodeError> {
 
 /// Splits length-prefixed frames. `cut` says the bytes end where the body limit cut them,
 /// so a short last frame is truncation rather than an error.
-fn frames(data: &[u8], cut: bool) -> (Stream, Vec<(String, String)>) {
+fn frames(data: &[u8], cut: bool, plan: &Plan) -> (Stream, Vec<(String, String)>) {
     let mut stream = Stream {
         truncated: cut,
         ..Stream::default()
@@ -312,22 +462,37 @@ fn frames(data: &[u8], cut: bool) -> (Stream, Vec<(String, String)>) {
             continue;
         }
         let compressed = flag & 0x01 != 0;
-        let (note, decoded) = if compressed {
-            (Some("compressed, not decoded".to_owned()), None)
-        } else {
-            let note = short.then(|| "cut by the body limit".to_owned());
-            (note, Some(protobuf::decode_within(payload, &mut budget)))
-        };
-        if budget == 0 {
-            stream.truncated = true;
-        }
-        stream.messages.push(Message {
+        let mut message = Message {
             index: stream.messages.len(),
             compressed,
             size: u64::from(declared),
-            note,
-            decoded,
-        });
+            inflated: None,
+            schema: None,
+            note: None,
+            decoded: None,
+        };
+        let clear = if compressed {
+            inflate(payload, plan, short).map(|(bytes, note)| {
+                message.inflated = Some(bytes.len());
+                (Cow::Owned(bytes), note)
+            })
+        } else {
+            let note = short.then(|| "cut by the body limit".to_owned());
+            Ok((Cow::Borrowed(payload), note))
+        };
+        match clear {
+            Ok((bytes, note)) => {
+                let (schema, failure, decoded) = self::payload(&bytes, plan, &mut budget);
+                message.schema = schema;
+                message.note = join_notes(note, failure);
+                message.decoded = Some(decoded);
+            }
+            Err(note) => message.note = Some(note),
+        }
+        if budget == 0 {
+            stream.truncated = true;
+        }
+        stream.messages.push(message);
         if short {
             break;
         }
@@ -552,6 +717,116 @@ mod tests {
         assert!(call.request.truncated);
     }
 
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(data).expect("compress");
+        encoder.finish().expect("finish")
+    }
+
+    #[test]
+    fn gzip_messages_are_inflated_and_unknown_codings_named() {
+        let mut x = grpc_exchange(
+            "application/grpc",
+            &frame(1, &gzip(HELLO)),
+            &frame(1, b"zz"),
+        );
+        x.request_headers
+            .push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        x.response_headers
+            .push(("grpc-encoding".to_owned(), "snappy".to_owned()));
+        let call = decode_exchange(&x).expect("a gRPC call");
+        let request = &call.request.messages[0];
+        assert_eq!(
+            (request.inflated, request.note.as_deref()),
+            (Some(HELLO.len()), None)
+        );
+        let decoded = request.decoded.as_ref().expect("inflated and decoded");
+        assert_eq!(
+            decoded.fields[0].value,
+            Value::String {
+                value: "world".to_owned()
+            }
+        );
+        let response = &call.response.expect("response").messages[0];
+        assert_eq!(
+            response.note.as_deref(),
+            Some("compressed with snappy, not decoded")
+        );
+        assert!(response.decoded.is_none());
+
+        let mut bad = grpc_exchange("application/grpc", &frame(1, b"not gzip"), b"");
+        bad.request_headers
+            .push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        let call = decode_exchange(&bad).expect("a gRPC call");
+        let note = call.request.messages[0].note.clone().unwrap_or_default();
+        assert!(note.starts_with("invalid gzip data"), "{note}");
+    }
+
+    #[test]
+    fn schemas_name_fields_and_fall_back_when_they_do_not_apply() {
+        use crate::schema::tests::{order_bytes, temp_dir, write_shop};
+        use crate::schema::{Schemas, Sources};
+        let dir = temp_dir("grpc");
+        let schemas = Schemas::load(Sources {
+            protos: vec![write_shop(&dir)],
+            ..Sources::default()
+        })
+        .expect("compiles");
+        let order = order_bytes(&schemas);
+        let mut x = grpc_exchange(
+            "application/grpc",
+            &frame(1, &gzip(&order)),
+            &frame(0, &[0x08, 0x01]),
+        );
+        x.url = "https://api.test/shop.Orders/Place".to_owned();
+        x.request_headers
+            .push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        let call = decode_exchange_with(&x, Some(&schemas)).expect("a gRPC call");
+        assert_eq!(call.request.schema.as_deref(), Some("shop.Order"));
+        let message = &call.request.messages[0];
+        assert_eq!(message.schema.as_deref(), Some("shop.Order"));
+        let first = &message.decoded.as_ref().expect("decoded").fields[0];
+        assert_eq!(
+            (first.name.as_deref(), first.proto.as_deref()),
+            (Some("id"), Some("int64"))
+        );
+        let response = call.response.expect("response");
+        assert_eq!(response.schema.as_deref(), Some("shop.Reply"));
+        let ok = &response.messages[0]
+            .decoded
+            .as_ref()
+            .expect("decoded")
+            .fields[0];
+        assert_eq!(ok.value, Value::Bool { value: true });
+
+        // Bytes that are not an Order: the schema-less tree, and why.
+        let mut broken = x.clone();
+        broken.request_headers.clear();
+        broken
+            .request_headers
+            .push(("content-type".to_owned(), "application/grpc".to_owned()));
+        broken.request_body = record(&frame(0, &[0x0a, 0x02, 0xff, 0xfe]), 1 << 20);
+        let call = decode_exchange_with(&broken, Some(&schemas)).expect("a gRPC call");
+        let message = &call.request.messages[0];
+        assert!(message.schema.is_none());
+        let note = message.note.clone().unwrap_or_default();
+        assert!(
+            note.starts_with("schema-less: not a valid shop.Order"),
+            "{note}"
+        );
+        assert!(message.decoded.is_some());
+
+        let unknown = grpc_exchange("application/grpc", &frame(0, HELLO), b"");
+        let call = decode_exchange_with(&unknown, Some(&schemas)).expect("a gRPC call");
+        assert_eq!(call.request.schema, None);
+        assert_eq!(
+            call.request.schema_note.as_deref(),
+            Some("schema-less: method not found")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn random_framed_bytes_never_panic() {
         let mut state: u64 = 7;
@@ -570,7 +845,7 @@ mod tests {
                 );
             }
             for cut in [false, true] {
-                let _ = frames(&data, cut);
+                let _ = frames(&data, cut, &Plan::default());
                 let _ = web_text(&data, cut);
             }
         }

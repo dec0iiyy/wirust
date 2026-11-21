@@ -52,15 +52,32 @@
       case "packed_varints": return "[" + field.values.join(", ") + "] (packed varints, a guess)";
       case "bytes":
         return field.size + " bytes: " + field.base64 + (field.truncated ? "..." : "");
+      case "bool": return String(field.value);
+      case "number": return field.value;
+      case "enum": return (field.symbol || "?") + " (" + field.value + ")";
+      case "json": return JSON.stringify(field.value);
       default: return "";
     }
+  }
+
+  /** Field number, then the schema name and declared type, else the wire type. */
+  function fieldLabel(field) {
+    const label = [el("span", "grpc-num", field.field)];
+    if (field.name) {
+      label.push(el("span", "grpc-name", " " + field.name));
+      const type = field.proto + (field.oneof ? ", oneof " + field.oneof : "");
+      label.push(el("span", "grpc-wire", " " + type + " "));
+    } else {
+      label.push(el("span", "grpc-wire", " " + field.wire + " "));
+    }
+    return label;
   }
 
   function fieldList(fields, depth) {
     const list = el("ul", depth === 0 ? "grpc-tree" : null);
     for (const field of fields || []) {
       const item = el("li");
-      const label = [el("span", "grpc-num", field.field), el("span", "grpc-wire", " " + field.wire + " ")];
+      const label = fieldLabel(field);
       if (field.type === "message") {
         const details = el("details");
         details.open = depth < 2;
@@ -83,7 +100,9 @@
     box.open = true;
     let title = "#" + m.index + "  " + m.size + " B";
     if (m.compressed) title += "  compressed";
+    if (m.inflated !== undefined) title += ", inflated to " + m.inflated + " B";
     box.append(el("summary", null, title));
+    if (m.schema) box.append(el("p", "grpc-schema", "decoded with " + m.schema));
     if (m.note) box.append(el("p", "grpc-note", m.note));
     if (m.decoded) {
       box.append(fieldList(m.decoded.fields, 0));
@@ -100,6 +119,8 @@
       section.append(el("p", "grpc-note", "No response."));
       return section;
     }
+    if (stream.schema) section.append(el("p", "grpc-schema", "schema " + stream.schema));
+    else if (stream.schema_note) section.append(el("p", "grpc-note", stream.schema_note));
     if (stream.messages.length === 0) section.append(el("p", "grpc-note", "No messages."));
     for (const m of stream.messages) section.append(messageView(m));
     if (stream.error) section.append(el("p", "grpc-error", stream.error));
@@ -140,11 +161,44 @@
     }
   }
 
+  /** The loaded .proto schemas (GET /api/v1/proto) as a collapsed panel; null when none. */
+  function schemaPanel(report) {
+    if (!report || (report.files.length === 0 && !report.error)) return null;
+    const box = el("details", "grpc-section grpc-schemas");
+    const services = report.services.length;
+    box.append(el("summary", null, "Schemas: " + report.files.length + " files, " + services + " services"));
+    if (report.error) box.append(el("p", "grpc-error", "Reload failed, previous schemas kept: " + report.error));
+    if (report.message) box.append(el("p", "grpc-note", "--proto-message " + report.message));
+    const list = el("ul", "grpc-tree");
+    for (const service of report.services) {
+      const item = el("li", null, service.name);
+      const methods = el("ul");
+      for (const m of service.methods) {
+        const input = (m.client_streaming ? "stream " : "") + m.input;
+        const output = (m.server_streaming ? "stream " : "") + m.output;
+        methods.append(el("li", "grpc-wire", m.name + "(" + input + ") -> " + output));
+      }
+      item.append(methods);
+      list.append(item);
+    }
+    box.append(list, el("p", "grpc-note", "Files: " + report.files.join(", ")));
+    return box;
+  }
+
+  async function schemas() {
+    try {
+      const response = await request("proto");
+      return response.ok ? await response.json() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function render(flow, container) {
     const raw = rawOf(flow);
     container.replaceChildren(el("p", "grpc-note", "Decoding..."));
     try {
-      const response = await request("flows/" + raw.id + "/grpc");
+      const [response, report] = await Promise.all([request("flows/" + raw.id + "/grpc"), schemas()]);
       const body = await response.json();
       container.replaceChildren();
       if (!response.ok) {
@@ -152,6 +206,8 @@
         return;
       }
       show(body, container);
+      const panel = schemaPanel(report);
+      if (panel) container.append(panel);
     } catch (e) {
       container.replaceChildren(el("p", "grpc-error", "Could not load: " + e));
     }

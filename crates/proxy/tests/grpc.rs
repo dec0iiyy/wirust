@@ -203,3 +203,113 @@ async fn grpc_messages_and_trailers_are_decoded_through_the_api() -> TestResult 
     assert_eq!(replies[1]["decoded"]["fields"][0]["value"], "bye");
     Ok(())
 }
+
+const SHOP: &str = r#"
+syntax = "proto3";
+package shop;
+enum Color { COLOR_UNSPECIFIED = 0; RED = 1; GREEN = 2; }
+message Order { int64 id = 1; map<string, int32> tags = 3; Color color = 4; }
+message Reply { bool ok = 1; }
+service Orders { rpc Place(Order) returns (Reply); }
+"#;
+
+/// A compressed `Order` sent to `/shop.Orders/Place` is inflated and decoded with the
+/// schema; the reply (a `HelloReply`, not a `shop.Reply`) falls back to the schema-less
+/// tree and says why.
+#[tokio::test]
+async fn schemas_decode_compressed_messages_through_the_api() -> TestResult {
+    use std::io::Write as _;
+    let certs = upstream_certs()?;
+    let port = grpc_server(&certs).await?;
+    let config = test_config(&certs.ca, 1 << 16)?;
+    let dir = config.config_dir.clone();
+    std::fs::create_dir_all(&dir)?;
+    let proto = dir.join("shop.proto");
+    std::fs::write(&proto, SHOP)?;
+    let schemas = wirust::schema::Schemas::load(wirust::schema::Sources {
+        protos: vec![proto],
+        ..wirust::schema::Sources::default()
+    })
+    .map_err(anyhow::Error::msg)?;
+    let mut proxy = Proxy::bind(config).await?;
+    let control = ControlPlane::bind(
+        "127.0.0.1:0".parse()?,
+        wirust::RemoteAccess::LoopbackOnly,
+        &mut proxy,
+    )
+    .await?;
+    control.set_schemas(schemas);
+    let (addr, token) = (control.local_addr(), control.token().to_owned());
+    tokio::spawn(control.run());
+    let mut running = spawn(proxy, dir);
+
+    // `Order { id: 42, tags: {"gift": 1}, color: GREEN }`, gzip-compressed.
+    let order = [
+        0x08, 0x2a, 0x1a, 0x08, 0x0a, 0x04, b'g', b'i', b'f', b't', 0x10, 0x01, 0x20, 0x02,
+    ];
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&order)?;
+    let mut frame = grpc_frame(&gz.finish()?);
+    frame[0] = 1;
+    let ca = CertificateDer::from_pem_slice(running.ca_pem.as_bytes())?;
+    let tls = tunnel(running.addr, port, &[ca], b"h2").await?;
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls)).await?;
+    tokio::spawn(connection);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("https://localhost:{port}/shop.Orders/Place"))
+        .header("content-type", "application/grpc")
+        .header("grpc-encoding", "gzip")
+        .header("te", "trailers")
+        .body(Full::new(Bytes::from(frame)))?;
+    let response = sender.send_request(request).await?;
+    response.into_body().collect().await?;
+    let record: Exchange = next_exchange(&mut running.events).await?;
+
+    let path = format!("/api/v1/flows/{}/grpc", record.id);
+    let (_, body) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let answer = api_get(addr, &token, &path).await?;
+            if answer.0 == StatusCode::OK {
+                return anyhow::Ok(answer);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    let call: serde_json::Value = serde_json::from_slice(&body)?;
+    let message = &call["request"]["messages"][0];
+    assert_eq!(call["request"]["schema"], "shop.Order");
+    assert_eq!(message["schema"], "shop.Order");
+    assert_eq!(message["inflated"], order.len());
+    let fields = message["decoded"]["fields"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        (&fields[0]["name"], &fields[0]["proto"], &fields[0]["value"]),
+        (&"id".into(), &"int64".into(), &"42".into())
+    );
+    assert_eq!(fields[1]["proto"], "map<string, int32>");
+    assert_eq!(fields[1]["fields"][0]["value"], "gift");
+    assert_eq!(
+        (&fields[2]["type"], &fields[2]["name"], &fields[2]["symbol"]),
+        (&"enum".into(), &"color".into(), &"GREEN".into())
+    );
+    let reply = &call["response"]["messages"][0];
+    assert_eq!(reply["schema"], serde_json::Value::Null);
+    let note = reply["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with("schema-less: not a valid shop.Reply"),
+        "{note}"
+    );
+
+    let (status, body) = api_get(addr, &token, "/api/v1/proto").await?;
+    assert_eq!(status, StatusCode::OK);
+    let report: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(report["files"], serde_json::json!(["shop.proto"]));
+    assert_eq!(report["services"][0]["name"], "shop.Orders");
+    assert_eq!(report["services"][0]["methods"][0]["input"], "shop.Order");
+    Ok(())
+}

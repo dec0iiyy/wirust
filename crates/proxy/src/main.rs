@@ -87,6 +87,7 @@ struct RunArgs {
     filter: Option<String>,
     har: Option<PathBuf>,
     rules: Option<PathBuf>,
+    schemas: wirust::schema::Sources,
     passthrough: Vec<String>,
     decrypt_only: Vec<String>,
     replay: ReplayArgs,
@@ -172,6 +173,7 @@ Usage:
          [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
          [--block-host HOST]... [--rules FILE] [--session FILE]
+         [--proto PATH]... [--proto-include DIR]... [--proto-message TYPE]
          [--passthrough PATTERN]... [--decrypt-only PATTERN]...
          [--ws-body-limit BYTES] [--ws-max-messages N] [--ws-log]
          [--android-cleanup [--serial S]]
@@ -236,6 +238,10 @@ Options:
   --har FILE            HAR file to write (export) or read (import)
   --rules FILE          TOML rules (block, map-local, map-remote, rewrite, throttle, breakpoints);
                         reloaded when it changes; see docs/rules.md
+  --proto PATH          .proto file, or directory scanned for them, to decode gRPC messages
+                        with field names (repeatable); reloaded on change; see docs/grpc.md
+  --proto-include DIR   import root for --proto files (repeatable)
+  --proto-message TYPE  message type for bare application/x-protobuf bodies, such as pkg.Msg
   --passthrough PATTERN relay this host's TLS undecrypted, such as '*.bank.example' or
                         'api.example.com:443' (repeatable); see docs/passthrough.md
   --decrypt-only PATTERN  decrypt only matching hosts and relay all others (repeatable)
@@ -530,6 +536,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         filter: None,
         har: None,
         rules: None,
+        schemas: wirust::schema::Sources::default(),
         passthrough: Vec::new(),
         decrypt_only: Vec::new(),
         replay: ReplayArgs::default(),
@@ -609,6 +616,9 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             "--filter" => run.filter = Some(value(arg)?),
             "--har" => run.har = Some(PathBuf::from(value(arg)?)),
             "--rules" => run.rules = Some(PathBuf::from(value(arg)?)),
+            "--proto" => run.schemas.protos.push(PathBuf::from(value(arg)?)),
+            "--proto-include" => run.schemas.includes.push(PathBuf::from(value(arg)?)),
+            "--proto-message" => run.schemas.message = Some(value(arg)?),
             "--passthrough" => run.passthrough.push(value(arg)?),
             "--decrypt-only" => run.decrypt_only.push(value(arg)?),
             "--id" => run.replay.id = Some(value(arg)?.parse().context("--id takes a flow id")?),
@@ -1084,6 +1094,7 @@ fn run(
     if let Some(proxy) = &config.upstream_proxy {
         announce_upstream_proxy(proxy);
     }
+    let schemas = load_schemas(std::mem::take(&mut args.schemas))?;
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
     runtime.block_on(async {
         let mut proxy = Proxy::bind(config).await?;
@@ -1121,6 +1132,7 @@ fn run(
         if let Some(rules) = &rules {
             start_rules(rules, control.as_ref(), args.rules.is_some());
         }
+        start_schemas(schemas, control.as_ref());
         let printer = tokio::spawn(print_flows(proxy.subscribe(), args.json, args.ws_log));
         let control = control.map(|control| tokio::spawn(control.run()));
         let result = tokio::select! {
@@ -1201,6 +1213,39 @@ fn start_rules(rules: &Rules, control: Option<&ControlPlane>, watch_file: bool) 
     }
     if watch_file {
         drop(rules.watch(Duration::from_secs(1)));
+    }
+}
+
+/// Compiles the `--proto` schemas, refusing to start on a bad one; `None` without `--proto`.
+fn load_schemas(
+    sources: wirust::schema::Sources,
+) -> anyhow::Result<Option<wirust::schema::Schemas>> {
+    if sources.protos.is_empty() {
+        anyhow::ensure!(
+            sources.includes.is_empty() && sources.message.is_none(),
+            "--proto-include and --proto-message need --proto"
+        );
+        return Ok(None);
+    }
+    let schemas =
+        wirust::schema::Schemas::load(sources).map_err(|e| anyhow::anyhow!("--proto: {e}"))?;
+    let report = schemas.report();
+    eprintln!(
+        "{NAME}: loaded {} schema file(s), {} service(s)",
+        report.files.len(),
+        report.services.len()
+    );
+    Ok(Some(schemas))
+}
+
+/// Hands the schemas to the control plane's API and watches their files for changes.
+fn start_schemas(schemas: Option<wirust::schema::Schemas>, control: Option<&ControlPlane>) {
+    let Some(schemas) = schemas else {
+        return;
+    };
+    drop(schemas.watch(Duration::from_secs(2)));
+    if let Some(control) = control {
+        control.set_schemas(schemas);
     }
 }
 

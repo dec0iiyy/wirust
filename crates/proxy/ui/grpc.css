@@ -14,6 +14,8 @@
 .grpc-tree details > summary { cursor: pointer; }
 .grpc-num { font-weight: 600; }
 .grpc-wire { color: var(--fg-dim); }
+.grpc-name { font-weight: 600; }
+.grpc-schema { color: var(--fg-dim); font-style: italic; margin: 4px 0; }
 .grpc-str { color: var(--client-err); word-break: break-all; white-space: pre-wrap; }
 .grpc-val { word-break: break-all; }
 .grpc-trailers { border-collapse: collapse; font-family: var(--mono); }

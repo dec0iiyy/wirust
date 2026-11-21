@@ -127,6 +127,8 @@ struct State {
     session_file: std::sync::OnceLock<PathBuf>,
     /// Replay, compose and the passthrough lists (`replay_api.rs`).
     replay: crate::replay_api::Handles,
+    /// The `--proto` schemas, once [`ControlPlane::set_schemas`] ran.
+    schemas: std::sync::OnceLock<crate::schema::Schemas>,
 }
 
 impl std::fmt::Debug for State {
@@ -171,6 +173,7 @@ impl ControlPlane {
             ca_fingerprint: sha256_fingerprint(&proxy.ca().cert_der()?),
             session_file: std::sync::OnceLock::new(),
             replay: crate::replay_api::Handles::new(proxy),
+            schemas: std::sync::OnceLock::new(),
         };
         Ok(Self {
             listener,
@@ -181,6 +184,12 @@ impl ControlPlane {
     /// Serves `rules` at `/api/v1/rules` (see `docs/rules.md`). Only the first call counts.
     pub fn set_rules(&self, rules: Rules) {
         let _ = self.state.rules.set(rules);
+    }
+
+    /// Decodes gRPC messages with `schemas` and serves them at `/api/v1/proto` (see
+    /// `docs/grpc.md`). Only the first call counts.
+    pub fn set_schemas(&self, schemas: crate::schema::Schemas) {
+        let _ = self.state.schemas.set(schemas);
     }
 
     /// Names the `--session` file, if any, in `/api/v1/info`. Only the first file counts.
@@ -306,7 +315,9 @@ fn module_routes(
     if let Some(response) = crate::har_api::route(&state.store, method, segments, query) {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
     }
-    if let Some(response) = crate::grpc_api::route(&state.store, method, segments) {
+    if let Some(response) =
+        crate::grpc_api::route(&state.store, state.schemas.get(), method, segments)
+    {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
     }
     if let Some((status, body)) = rules_api::route(
