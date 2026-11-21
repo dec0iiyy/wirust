@@ -78,6 +78,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         "text/css; charset=utf-8",
         include_bytes!("../ui/ws.css"),
     ),
+    (
+        "/replay.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../ui/replay.js"),
+    ),
+    (
+        "/replay.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../ui/replay.css"),
+    ),
 ];
 
 type ControlBody = UnsyncBoxBody<Bytes, Infallible>;

@@ -4,6 +4,9 @@ Send a captured request again, changed or not, or write one from scratch. The re
 through the proxy's own forwarding path (the same upstream connections, TLS settings and
 record building as client traffic) and is recorded as a new flow.
 
+In the web UI the detail pane has **Replay**, **Edit & replay** and **New request**, which
+use the routes below; the Replay tab links a replay to its original (see `docs/ui.md`).
+
 ## API (control plane, `--ui`)
 
 Both routes need the token like every `/api/v1/` route, and both are `POST`.
