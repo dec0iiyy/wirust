@@ -221,8 +221,11 @@ fn generated_javascript_sends_what_was_captured() -> TestResult {
 
 #[test]
 fn generated_swift_sends_what_was_captured() -> TestResult {
-    if !have("swiftc", &["--version"]) {
-        eprintln!("skipped: swiftc is not available");
+    // The generated code sends non-ASCII header values as UTF-8 bytes the way Apple's
+    // URLSession does; swift-corelibs-foundation on Linux encodes them differently, so the
+    // run is checked on macOS only.
+    if !cfg!(target_os = "macos") || !have("swiftc", &["--version"]) {
+        eprintln!("skipped: needs swiftc on macOS");
         return Ok(());
     }
     // Compiling takes seconds per snippet: a few cases that cover text, JSON and binary.

@@ -1,0 +1,4 @@
+# Keep line endings the same on every platform: tests compare text files byte for byte
+# (golden files, the examples in docs/scripting.md) and install.sh must stay LF.
+* text=auto eol=lf
+*.png binary

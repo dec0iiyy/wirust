@@ -29,9 +29,10 @@ fn every_language_matches_its_golden_files() -> anyhow::Result<()> {
                 std::fs::create_dir_all(path.parent().expect("a directory"))?;
                 std::fs::write(&path, &got)?;
             }
-            let want = std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("{}: {e}; run with UPDATE_GOLDEN=1", path.display())
-            })?;
+            // A checkout with CRLF line endings (Windows) must not fail the comparison.
+            let want = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("{}: {e}; run with UPDATE_GOLDEN=1", path.display()))?
+                .replace("\r\n", "\n");
             assert_eq!(got, want, "{} / {}", lang.id(), case.name);
         }
     }
