@@ -972,10 +972,11 @@ fn android_setup(dir: Option<PathBuf>, mobile: &MobileArgs) -> anyhow::Result<()
         "The device now sends HTTP traffic to 127.0.0.1:{port}, which adb reverse maps to this
 computer. Start the proxy:   {NAME} --listen 127.0.0.1:{port} --android-cleanup
 
-Then on the device: Settings > Security & privacy > More security settings > Encryption &
+Then on the device: Settings > Security & privacy > More security & privacy > Encryption &
 credentials > Install a certificate > CA certificate, and pick Download/{NAME}-ca.crt
-(menu names vary by vendor). Only your own debug builds that opt in with debug-overrides
-trust it; see docs/mobile.md.
+(menu names vary by vendor; Android asks for a screen lock first). Chrome and other browsers
+trust the certificate; most apps do not unless they opt in with debug-overrides (your own
+debug builds). See docs/mobile.md.
 
 IMPORTANT: while the proxy is not running the device has no working HTTP proxy. Undo with:
   {reset}"

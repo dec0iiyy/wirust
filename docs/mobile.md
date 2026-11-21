@@ -1,8 +1,11 @@
 # Phones and tablets
 
-Status: written from platform documentation and the code; **nothing here has been tried on a
-real device or simulator with this tool yet**. Claims that the sources did not confirm are
-marked "not verified". Corrections welcome.
+Status: written from platform documentation and the code, then **tried once on the Android
+emulator** (Pixel 9 image with Google Play, Android 16 / API 36, Chrome 157, 2026-11-21): the
+USB setup below, installing the CA by hand, decrypted HTTPS in Chrome with the client's JA4,
+and the reset on exit all worked as described. **No physical device and nothing on iOS has
+been tried.** Claims that neither the sources nor that run confirmed are marked "not
+verified". Corrections welcome.
 
 ## What works
 
@@ -43,9 +46,11 @@ Files: `/ca.crt` (DER), `/ca.pem` (PEM), `/ca.mobileconfig` (iOS profile), `/mob
 2. Run `wirust android setup` (see the USB section; it works the same for an emulator).
 3. Install the certificate as in the USB section.
 
-Not verified: the emulator alias `10.0.2.2` for the host's loopback, and the emulator flag
-`-http-proxy http://HOST:PORT` (documented by Google as making all TCP connections go through
-the proxy). `android setup` avoids both by using `adb reverse`.
+Verified on the Pixel 9 emulator (Android 16): `android setup` set the proxy and the reverse
+mapping, Chrome's traffic reached the proxy, and `--android-cleanup` put the setting back when
+the proxy stopped. Not verified: the emulator alias `10.0.2.2` for the host's loopback, and
+the emulator flag `-http-proxy http://HOST:PORT` (documented by Google as making all TCP
+connections go through the proxy). `android setup` avoids both by using `adb reverse`.
 
 ## Android device over USB
 
@@ -63,11 +68,17 @@ adb shell settings put global http_proxy 127.0.0.1:8080
 adb push CONFIG_DIR/wirust-ca.crt /sdcard/Download/wirust-ca.crt
 ```
 
-Then on the device: Settings > Security & privacy > More security settings > Encryption &
+Then on the device: Settings > Security & privacy > More security & privacy > Encryption &
 credentials > Install a certificate > **CA certificate**, and pick
-`Download/wirust-ca.crt`. That is the Pixel wording; other vendors differ. If Android
-reports a "VPN & app user certificate", choose "CA certificate" instead. Check the result
-under Trusted credentials > User.
+`Download/wirust-ca.crt`. That is the Pixel wording on Android 16; other vendors and versions
+differ. The page offers "CA certificate", "VPN & app user certificate" and "Wi-Fi
+certificate": choose "CA certificate". Android warns that your data will not be private (tap
+"Install anyway") and asks for the screen lock PIN, so a device with no screen lock must get
+one first. Check the result under Trusted credentials > User.
+
+Chrome trusts the certificate. Google's own system services (Play services and the like)
+keep refusing it, so the log shows `TLS-FAIL ... CertificateUnknown` for hosts such as
+`android.googleapis.com`; that is expected, and `--passthrough` silences them.
 
 **Undo it.** The proxy setting stays on the device after the proxy stops, and then the
 device's HTTP traffic goes nowhere. `android reset` runs:
@@ -78,7 +89,8 @@ adb reverse --remove tcp:8080
 ```
 
 `--android-cleanup` runs the same reset when the proxy exits or gets Ctrl-C. The `:0` form
-comes from community guides, not an official page (not verified on a device). `adb reverse`
+comes from community guides, not an official page; it worked on the Android 16 emulator
+(`settings get global http_proxy` printed `:0` afterwards). `adb reverse`
 mappings also end when the device disconnects.
 
 Why USB and `127.0.0.1`: Android 17 enforces the `ACCESS_LOCAL_NETWORK` permission for apps

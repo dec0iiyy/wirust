@@ -143,7 +143,7 @@ official pages do not say.
 | Scripting | no | JavaScript | | Python |
 | gRPC, protobuf views | yes (schema-less) | protobuf | protobuf | yes |
 | HTTP/3 | no | | | yes |
-| Sets the system proxy | yes (macOS, Windows, GNOME) | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
+| Sets the system proxy | yes (macOS; Windows and GNOME written but untested) | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
 | Client JA4, JA3 | yes | | | |
 
 Not in wirust yet: a native app, scripting, `.proto`-aware gRPC views, HTTP/3. See
@@ -203,13 +203,16 @@ passthrough, WebSocket, gRPC, phones, architecture, design, roadmap and releasin
 
 ## Status
 
-Version 0.1.0, the first release. 155 automated tests (unit and integration, offline,
-in-process servers and clients on loopback) run in CI on Linux, macOS and Windows, plus a
-check against Rust 1.88. They cover HTTP/1.1 and HTTP/2 interception, the flow record and
-fingerprints, failed handshakes, every control-plane security check, rules and breakpoints,
-replay, passthrough, WebSocket capture, HAR, pairing and the UI assets. Checked by hand:
-curl through the proxy, and the web UI in headless Chrome. Not tried yet: real phones and
-simulators, browsers as proxy clients, Windows outside CI.
+Version 0.1.0 is released; this tree is ahead of it. 231 automated tests (unit and
+integration, offline, in-process servers and clients on loopback) run in CI on Linux, macOS
+and Windows, plus a check against Rust 1.88. They cover HTTP/1.1 and HTTP/2 interception, the
+flow record and fingerprints, failed handshakes, every control-plane security check, rules
+and breakpoints, replay, passthrough, WebSocket capture, gRPC and protobuf decoding,
+`Content-Encoding` decoding, upstream proxies, the system-proxy and trust-store commands (with
+a fake command runner), HAR, pairing and the UI assets. Checked by hand: curl through the
+proxy, the web UI in headless Chrome, and Chrome on an Android 16 emulator over `adb` (setup,
+installing the CA, decrypted HTTPS, reset on exit). Not tried yet: real phones, anything on
+iOS, `system-proxy` and `ca install` on the real operating systems, Windows outside CI.
 
 ## Licence
 
