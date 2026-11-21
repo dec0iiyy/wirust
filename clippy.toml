@@ -1,1 +1,1 @@
-doc-valid-idents = ["ClientHello", "WebSocket", ".."]
+doc-valid-idents = ["ClientHello", "WebSocket", "WireGuard", ".."]

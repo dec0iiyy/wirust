@@ -44,6 +44,8 @@ pub mod throttle;
 pub mod trust;
 mod upstream;
 pub mod upstream_proxy;
+#[cfg(feature = "wireguard")]
+pub mod wireguard;
 pub mod ws;
 mod ws_api;
 

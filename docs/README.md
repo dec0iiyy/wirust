@@ -11,6 +11,7 @@
 - [desktop.md](desktop.md): one-command setup: trusting the CA and setting the system proxy, with undo.
 - [grpc.md](grpc.md): schema-less gRPC, gRPC-Web and protobuf decoding, trailers and its limits.
 - [mobile.md](mobile.md): connecting Android and iOS devices, and what they will not let you see.
+- [wireguard.md](wireguard.md): experimental WireGuard capture mode (cargo feature `wireguard`, off by default) for apps that ignore the proxy.
 - [architecture.md](architecture.md): module map, one exchange step by step, the flow schema, extension seams.
 - [design.md](design.md): design decisions and what they cost.
 - [roadmap.md](roadmap.md): what is not built yet.

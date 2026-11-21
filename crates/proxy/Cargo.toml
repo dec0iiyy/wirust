@@ -50,6 +50,15 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "
 tokio-rustls = "0.26.6"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 webpki-roots = "1.0.12"
+# The experimental WireGuard capture mode (`wirust wireguard`, docs/wireguard.md): the noise
+# protocol only, without boringtun's TUN device code, and a userspace TCP/IP stack.
+boringtun = { version = "0.7.1", default-features = false, optional = true }
+# 0.12: 0.13 and later need Rust 1.91, above the workspace's rust-version.
+smoltcp = { version = "0.12.0", default-features = false, optional = true, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
+
+[features]
+# Experimental and off by default: release builds do not include it.
+wireguard = ["dep:boringtun", "dep:smoltcp"]
 
 [dev-dependencies]
 # Compresses test bodies; the proxy itself only decodes.

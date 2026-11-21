@@ -64,6 +64,13 @@ enum Command {
         config_dir: Option<PathBuf>,
         args: ReplayArgs,
     },
+    /// `wireguard add-peer NAME [--lan-ip IP] [--port P]` (experimental)
+    #[cfg(feature = "wireguard")]
+    WireguardAddPeer {
+        name: String,
+        config_dir: Option<PathBuf>,
+        mobile: MobileArgs,
+    },
     /// `--help`, with the command words given before or after it (none: the main help).
     Help(Vec<String>),
     Version,
@@ -96,6 +103,9 @@ struct RunArgs {
     upstream_bypass: Bypass,
     system_proxy: SystemProxyFlag,
     confirm: Confirm,
+    /// `wireguard`: the UDP address of the WireGuard capture mode (experimental).
+    #[cfg(feature = "wireguard")]
+    wireguard: Option<SocketAddr>,
 }
 
 /// `ca install|uninstall|status`.
@@ -185,6 +195,8 @@ Usage:
   {NAME} view --session FILE [--filter QUERY]
   {NAME} replay --session FILE --id N [--set-header 'N: V']... [--method M] [--url U]
          [--via http://127.0.0.1:8080] [--config-dir DIR]
+  {NAME} wireguard [--listen UDP_ADDR] [--allow-remote] [run options]       (experimental)
+  {NAME} wireguard add-peer NAME [--lan-ip IP] [--port P] [--config-dir DIR] (experimental)
   {NAME} COMMAND --help      the options of one command
 
 Commands:
@@ -201,6 +213,9 @@ Commands:
                         settings first; `off` restores them, `status` shows them
   replay                send flow N of a session file again through a running proxy (--via),
                         as an ordinary client, and print the status line; see docs/replay.md
+  wireguard             experimental, only in builds with the cargo feature `wireguard`:
+                        capture a phone's TCP traffic through the official WireGuard app
+                        (docs/wireguard.md); `add-peer` prints a client config and QR code
 
 Options:
   -h, --help            print this help; after a command, such as `{NAME} ca --help`, the
@@ -503,6 +518,45 @@ Options:
   --config-dir DIR      where the CA is kept (default: the platform config dir)
 "
         ),
+        ["wireguard"] => format!(
+            "{NAME} wireguard: capture a phone's traffic through the WireGuard app (experimental)
+
+Usage:
+  {NAME} wireguard [--listen UDP_ADDR] [--allow-remote] [run options]
+  {NAME} wireguard add-peer NAME [--lan-ip IP] [--port P] [--config-dir DIR]
+
+Only in builds with the cargo feature `wireguard`; release builds do not have it.
+Listens for WireGuard on UDP_ADDR and turns every TCP connection of the configured
+peers into flows, as if the phone had sent CONNECT. DNS is relayed to this computer's
+resolver; QUIC (UDP/443) and other UDP are dropped, so apps fall back to TCP. The HTTP
+proxy listener moves to a free loopback port. Peers are read at start. See
+docs/wireguard.md.
+
+Options:
+  --listen UDP_ADDR     the WireGuard address (default 127.0.0.1:51820); a phone needs a
+                        LAN address, which also needs --allow-remote
+  --allow-remote        allow a non-loopback --listen address; only configured peer keys
+                        get an answer
+
+The options of a plain run work too, such as --ui, --rules and --passthrough.
+"
+        ),
+        ["wireguard", "add-peer"] => format!(
+            "{NAME} wireguard add-peer: add a phone to the WireGuard capture mode (experimental)
+
+Usage:
+  {NAME} wireguard add-peer NAME [--lan-ip IP] [--port P] [--config-dir DIR]
+
+Creates a key pair for the peer, stores its public key and tunnel address, and prints
+a configuration for the official WireGuard app as text and as a QR code. The peer's
+private key is shown once and not stored. Restart `{NAME} wireguard` to load the peer.
+
+Options:
+  --lan-ip IP           the address the phone reaches this computer on (default: detected)
+  --port P              the WireGuard port in the configuration (default 51820)
+  --config-dir DIR      where the keys are kept (default: the platform config dir)
+"
+        ),
         _ => return None,
     };
     Some(page)
@@ -539,10 +593,13 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         upstream_bypass: Bypass::default(),
         system_proxy: SystemProxyFlag::Off,
         confirm: Confirm::Ask,
+        #[cfg(feature = "wireguard")]
+        wireguard: None,
     };
     let mut mobile = MobileArgs::default();
     let mut words = Vec::new();
     let mut help = false;
+    let mut listen_given = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
@@ -557,6 +614,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                 run.listen = value(arg)?
                     .parse()
                     .context("--listen takes IP:PORT, such as 127.0.0.1:8080")?;
+                listen_given = true;
             }
             "--json" => run.json = true,
             "--body-limit" => {
@@ -699,6 +757,27 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                 args: run.replay,
             })
         }
+        #[cfg(feature = "wireguard")]
+        ["wireguard"] => {
+            let default = SocketAddr::from(([127, 0, 0, 1], wirust::wireguard::DEFAULT_PORT));
+            run.wireguard = Some(if listen_given { run.listen } else { default });
+            // The HTTP proxy listener stays on loopback, on a free port.
+            run.listen = SocketAddr::from(([127, 0, 0, 1], 0));
+            Ok(Command::Run(run, mobile))
+        }
+        #[cfg(feature = "wireguard")]
+        ["wireguard", "add-peer", name] => Ok(Command::WireguardAddPeer {
+            name: name.to_owned(),
+            config_dir: dir,
+            mobile,
+        }),
+        #[cfg(not(feature = "wireguard"))]
+        ["wireguard", ..] => {
+            let _ = listen_given;
+            bail!(
+                "this build has no WireGuard capture mode; it needs the cargo feature `wireguard`"
+            )
+        }
         _ => bail!("unknown command {}; see --help", words.join(" ")),
     }
 }
@@ -810,8 +889,84 @@ fn execute(command: Command) -> anyhow::Result<()> {
             config_dir: dir,
             args,
         } => replay(&session, &config_dir(dir)?, args)?,
+        #[cfg(feature = "wireguard")]
+        Command::WireguardAddPeer {
+            name,
+            config_dir: dir,
+            mobile,
+        } => wireguard_add_peer(&name, &config_dir(dir)?, &mobile)?,
     }
     Ok(())
+}
+
+/// `wireguard add-peer NAME`: a new peer, printed as a client config and a QR code.
+#[cfg(feature = "wireguard")]
+fn wireguard_add_peer(
+    name: &str,
+    dir: &std::path::Path,
+    mobile: &MobileArgs,
+) -> anyhow::Result<()> {
+    use wirust::wireguard::{DEFAULT_PORT, PublicKey, Store, client_config};
+    let store = Store::new(dir);
+    let server = PublicKey::from(&store.server_key()?);
+    let ip = match mobile.lan_ip {
+        Some(ip) => ip,
+        None => wirust::mobile::lan_ipv4()?,
+    };
+    let endpoint = SocketAddr::new(ip.into(), mobile.port.unwrap_or(DEFAULT_PORT));
+    let (peer, key) = store.add_peer(name)?;
+    let config = client_config(&peer, &key, &server, endpoint);
+    println!("{config}\n{}", qr::terminal(&config)?);
+    eprintln!(
+        "{NAME}: added peer {name} ({}); this private key is not stored anywhere. Start or \
+         restart `{NAME} wireguard --listen {endpoint} --allow-remote` to accept it \
+         (experimental, see docs/wireguard.md).",
+        peer.address
+    );
+    Ok(())
+}
+
+/// Stops the WireGuard listener task when dropped.
+#[cfg(feature = "wireguard")]
+struct AbortOnDrop(tokio::task::JoinHandle<anyhow::Result<()>>);
+
+#[cfg(feature = "wireguard")]
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Starts the WireGuard capture mode for `proxy` when `listen` is set; it runs until the
+/// result is dropped.
+#[cfg(feature = "wireguard")]
+async fn start_wireguard(
+    listen: Option<SocketAddr>,
+    remote: RemoteAccess,
+    dir: &std::path::Path,
+    proxy: &Proxy,
+) -> anyhow::Result<Option<AbortOnDrop>> {
+    use wirust::wireguard::{Server, Store, system_resolver};
+    let Some(listen) = listen else {
+        return Ok(None);
+    };
+    let store = Store::new(dir);
+    let peers = store.peers()?;
+    let resolver = system_resolver();
+    let count = peers.len();
+    let server = Server::bind(proxy, listen, remote, store.server_key()?, peers, resolver).await?;
+    let dns = resolver.map_or_else(
+        || "dropped (no resolver found)".to_owned(),
+        |r| r.to_string(),
+    );
+    eprintln!(
+        "{NAME} WireGuard capture mode (experimental) on UDP {}: {count} peer(s), DNS to {dns}",
+        server.local_addr()?
+    );
+    if count == 0 {
+        eprintln!("{NAME}: no peers yet; add one with `{NAME} wireguard add-peer NAME`");
+    }
+    Ok(Some(AbortOnDrop(tokio::spawn(server.run()))))
 }
 
 /// `ca install|uninstall|status`: the CA in the current user's trust store.
@@ -1091,6 +1246,9 @@ fn run(
             Some(addr) => Some(ControlPlane::bind(addr, remote, &mut proxy).await?),
             None => None,
         };
+        // After the control plane, which adds the refused targets the listener shares.
+        #[cfg(feature = "wireguard")]
+        let _wireguard = start_wireguard(args.wireguard, remote, &dir, &proxy).await?;
         eprintln!(
             "{NAME} listening on {}  CA: {}",
             proxy.local_addr()?,

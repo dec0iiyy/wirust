@@ -34,6 +34,7 @@ built in parallel without editing the same functions.
 | `query.rs`, `curl.rs` | the search query language (`?q=`, `--filter`) and the cURL export (`/api/v1/flows/{id}/curl`) |
 | `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `GET /api/v1/flows/{id}/messages`; `docs/websocket.md` |
 | `grpc.rs`, `protobuf.rs`, `grpc_api.rs` | gRPC, gRPC-Web and protobuf decoding of recorded bodies: framing, status from `response_trailers`, the schema-less decoder, `GET /api/v1/flows/{id}/grpc`; `docs/grpc.md` |
+| `wireguard.rs`, `wireguard/` | experimental, cargo feature `wireguard` only: keys and peers (`config.rs`), the UDP listener with boringtun sessions, a smoltcp stack and the DNS relay (`server.rs`); terminated connections go to `serve_transparent` in `proxy.rs`; `docs/wireguard.md` |
 | `ui/` | static files embedded with `include_bytes!` (`index.html`, `panels.js`, `app.js`, `style.css`, `ws.js` and `ws.css` for the Messages tab, `grpc.js` and `grpc.css` for the gRPC tab) |
 
 ## One exchange
