@@ -335,6 +335,15 @@ mod tests {
         )
     }
 
+    /// The keychain path as the code builds it: `join` uses the host's separator, so the
+    /// expected commands are built the same way and the tests also pass on Windows.
+    fn keychain() -> String {
+        Path::new("/home/u")
+            .join("Library/Keychains/login.keychain-db")
+            .display()
+            .to_string()
+    }
+
     fn keychain_output(sha256: &str) -> String {
         format!(
             "SHA-256 hash: {sha256}\nSHA-1 hash: 0000\nkeychain: \"/home/u/Library/Keychains/\
@@ -357,8 +366,10 @@ mod tests {
         ca.install()?;
         assert_eq!(
             ca.runner().writes(),
-            ["security add-trusted-cert -r trustRoot -k \
-              /home/u/Library/Keychains/login.keychain-db /cfg/ca-cert.pem"]
+            [format!(
+                "security add-trusted-cert -r trustRoot -k {} /cfg/ca-cert.pem",
+                keychain()
+            )]
         );
         Ok(())
     }
@@ -376,10 +387,7 @@ mod tests {
             ca.runner().writes(),
             [
                 "security remove-trusted-cert /cfg/ca-cert.pem".to_owned(),
-                format!(
-                    "security delete-certificate -Z {} /home/u/Library/Keychains/login.keychain-db",
-                    sha1()
-                ),
+                format!("security delete-certificate -Z {} {}", sha1(), keychain()),
             ]
         );
 

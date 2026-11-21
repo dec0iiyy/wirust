@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository = "https://github.com/dec0iiyy/wirust"
-homepage = "https://github.com/dec0iiyy/wirust"
 readme = "../../README.md"
 keywords = ["proxy", "https", "debugging", "mitm", "ja4"]
 categories = ["command-line-utilities", "development-tools::debugging", "network-programming"]

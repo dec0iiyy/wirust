@@ -2,7 +2,7 @@
 //!
 //! [`decode_exchange`] finds the call kind from the `Content-Type`, splits each body into
 //! the length-prefixed gRPC messages (compressed flag, 4-byte big-endian length), decodes
-//! each with the schema-less [`protobuf`](crate::protobuf) decoder, and reads `grpc-status`
+//! each with the schema-less [`protobuf`] decoder, and reads `grpc-status`
 //! and `grpc-message` from the HTTP/2 trailers, a trailers-only response head, or the
 //! trailer frame of a gRPC-Web body. Compressed messages are reported, not inflated: no
 //! decompressor is linked. Works on the kept part of the bodies (`--body-limit`).
