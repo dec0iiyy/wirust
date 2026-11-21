@@ -3,6 +3,7 @@
 - [install.md](install.md): installing on Linux, macOS and Windows (Scoop), the unsigned Windows binary, verifying a download.
 - [ui.md](ui.md): the web UI, its keys, search and the URL fragment options.
 - [rules.md](rules.md): TOML rules (block, map local and remote, rewrite, delay, throttle, breakpoints) and their API.
+- [scripting.md](scripting.md): `--script` Rhai hooks, their API, the sandbox limits and the order with rules.
 - [interchange.md](interchange.md): session files, HAR export and import, the search syntax, cURL copies.
 - [replay.md](replay.md): sending a captured request again, changed or composed from scratch.
 - [passthrough.md](passthrough.md): relaying chosen hosts undecrypted, with their TLS fingerprint still recorded.

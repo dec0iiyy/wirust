@@ -7,6 +7,8 @@ stderr and in `GET /api/v1/rules`. With `--ui` the rules engine is always on (em
 `--rules`) so rules can be managed over the API.
 
 The built-in flags (`--block-host`, `--add-header`, `--remove-header`) run before the rules.
+Scripts (`--script`) run after the rule actions and before the rule breakpoints; see
+[scripting.md](scripting.md).
 
 ## Example
 

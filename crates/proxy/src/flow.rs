@@ -124,6 +124,10 @@ pub enum Flag {
     UpstreamProxy,
     /// The rule with this name fired (`rule:<name>`).
     Rule(String),
+    /// A script failed on this exchange and was skipped for it (`--script`).
+    ScriptError,
+    /// A script called `flag(name)` (`script:<name>`).
+    Script(String),
 }
 
 impl fmt::Display for Flag {
@@ -140,6 +144,8 @@ impl fmt::Display for Flag {
             Self::WsCompressed => "ws_compressed",
             Self::UpstreamProxy => "upstream_proxy",
             Self::Rule(name) => return write!(f, "rule:{name}"),
+            Self::ScriptError => "script_error",
+            Self::Script(name) => return write!(f, "script:{name}"),
         })
     }
 }
@@ -166,9 +172,11 @@ impl<'de> Deserialize<'de> for Flag {
             "ws_extensions_stripped" => Self::WsExtensionsStripped,
             "ws_compressed" => Self::WsCompressed,
             "upstream_proxy" => Self::UpstreamProxy,
-            other => match other.strip_prefix("rule:") {
-                Some(name) => Self::Rule(name.to_owned()),
-                None => {
+            "script_error" => Self::ScriptError,
+            other => match (other.strip_prefix("rule:"), other.strip_prefix("script:")) {
+                (Some(name), _) => Self::Rule(name.to_owned()),
+                (None, Some(name)) => Self::Script(name.to_owned()),
+                (None, None) => {
                     return Err(serde::de::Error::unknown_variant(
                         other,
                         &[
@@ -183,6 +191,8 @@ impl<'de> Deserialize<'de> for Flag {
                             "ws_compressed",
                             "upstream_proxy",
                             "rule:<name>",
+                            "script_error",
+                            "script:<name>",
                         ],
                     ));
                 }

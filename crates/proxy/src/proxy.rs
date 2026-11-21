@@ -611,6 +611,13 @@ impl Target {
         parts: &mut http::request::Parts,
         path: String,
     ) -> RequestCtx {
+        let mut extensions = http::Extensions::new();
+        if let Some(tls) = &self.tls {
+            extensions.insert(crate::intercept::ClientInfo {
+                ja4: tls.ja4.clone(),
+                known_client: tls.client.clone(),
+            });
+        }
         RequestCtx {
             id,
             client,
@@ -622,7 +629,7 @@ impl Target {
             headers: std::mem::take(&mut parts.headers),
             body: None,
             flags: Vec::new(),
-            extensions: http::Extensions::new(),
+            extensions,
         }
     }
 
