@@ -15,6 +15,7 @@ pub mod certs;
 mod clock;
 pub mod control;
 pub mod curl;
+pub mod decode;
 pub mod events;
 pub mod flow;
 pub mod grpc;

@@ -758,7 +758,8 @@ where
         if let Some(client_upgrade) = client_upgrade {
             join_upgrades(client_upgrade, hyper::upgrade::on(&mut response), capture);
         }
-        record.request_body = BodyRecord::from(&*lock(&request_capture));
+        record.request_body =
+            BodyRecord::from_capture(&lock(&request_capture), &record.request_headers);
         record.timing.total_ms = ms(start.elapsed());
         state.emit(Event::Exchange(Box::new(record)));
         let (parts, _) = response.into_parts();
@@ -783,9 +784,13 @@ where
         let bus = state.bus.clone();
         let response_capture = Arc::clone(&response_capture);
         Box::new(move |error| {
-            record.request_body = BodyRecord::from(&*lock(&request_capture));
+            record.request_body =
+                BodyRecord::from_capture(&lock(&request_capture), &record.request_headers);
             let response = lock(&response_capture);
-            record.response_body = Some(BodyRecord::from(&*response));
+            record.response_body = Some(BodyRecord::from_capture(
+                &response,
+                &record.response_headers,
+            ));
             record.response_trailers = response.trailers().to_vec();
             drop(response);
             record.timing.total_ms = ms(start.elapsed());
@@ -1048,8 +1053,8 @@ fn respond_locally(
     set_response_head(&mut record, parts.status, &parts.headers);
     let mut capture = Capture::new(state.body_limit);
     capture.push(&bytes);
-    record.request_body = BodyRecord::from(&*lock(request_capture));
-    record.response_body = Some(BodyRecord::from(&capture));
+    record.request_body = BodyRecord::from_capture(&lock(request_capture), &record.request_headers);
+    record.response_body = Some(BodyRecord::from_capture(&capture, &record.response_headers));
     record.timing.total_ms = ms(start.elapsed());
     state.emit(Event::Exchange(Box::new(record)));
     Response::from_parts(parts, full(bytes))
@@ -1209,7 +1214,7 @@ fn fail(
     start: Instant,
     error: &str,
 ) -> Response<ProxyBody> {
-    record.request_body = BodyRecord::from(&*lock(request_capture));
+    record.request_body = BodyRecord::from_capture(&lock(request_capture), &record.request_headers);
     record.timing.total_ms = ms(start.elapsed());
     record.error = Some(error.to_owned());
     state.emit(Event::Exchange(Box::new(record)));

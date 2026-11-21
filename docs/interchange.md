@@ -26,6 +26,37 @@ can span several runs. Each line is flushed when written; after a crash the last
 cut, and readers skip it with a warning. A record with a newer `schema_version` is read with a
 warning and its unknown fields are ignored. Any other broken line is an error naming the line.
 
+## Body records
+
+`request_body` and `response_body` are `{ "size", "truncated", "encoding": "utf8" | "base64",
+"data" }`: the first `--body-limit` bytes of the body. A body sent with a `Content-Encoding`
+other than `identity` is decoded before it is stored, and the record gains
+`content_encoding` (omitted otherwise, so `schema_version` stays 1 and older files load as they
+are):
+
+```json
+"response_body": {
+  "size": 1256, "truncated": false, "encoding": "utf8", "data": "<!doctype html>...",
+  "content_encoding": { "codings": ["br"], "wire_size": 334, "decoded": true }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `codings` | the codings in the order the sender applied them, lowercase, `identity` left out (`gzip, br` = gzip first) |
+| `wire_size` | bytes on the wire, all of them, also past the limit |
+| `decoded` | `true`: `data` and `size` are the decoded body; `false`: they are the wire bytes |
+| `reason` | why the body is not decoded (unknown coding, invalid data), or why the decoded body is cut short; omitted when there is nothing to say |
+
+- Codings: `gzip` and `x-gzip` (several members allowed), `deflate` (zlib-wrapped, or raw
+  deflate as some servers send), `br`, `zstd`. Lists are undone last first. An unknown coding
+  or invalid data keeps the wire bytes with `decoded: false` and a `reason`.
+- Limits: the decoded output stops at `--body-limit` per body (and per layer of a list) and at
+  1000 output bytes per input byte (at least 64 KiB), whichever comes first; the record is then
+  `truncated` and `size` counts the decoded bytes kept. A body whose wire bytes were cut by the
+  limit decodes as far as the kept bytes go and is `truncated` too.
+- Only the stored copy is decoded: what goes to the client and to the server is unchanged.
+
 ## HAR export and import
 
 ```sh
@@ -47,10 +78,11 @@ have no HAR form. The mapping:
 | `request.method`, `url`, `httpVersion` | as recorded; `h2` becomes `HTTP/2` |
 | `request.headers`, `cookies`, `queryString` | headers in the original order; `Cookie` pairs; the URL query, percent-decoded |
 | `request.postData` | `mimeType` from `Content-Type`, `text`, `encoding: "base64"` for binary bodies |
-| `request.headersSize`, `bodySize` | -1 (unknown); the full body size |
+| `request.headersSize`, `bodySize` | -1 (unknown); the full body size on the wire (`wire_size` for a decoded body) |
 | `response.status`, `statusText`, `httpVersion` | 0 and `""` when no response arrived |
 | `response.headers`, `cookies`, `redirectURL` | original order; `Set-Cookie` with path, domain, expires, httpOnly, secure; `Location` |
-| `response.content` | `size`, `mimeType` (`x-unknown` when absent), `text`, `encoding` |
+| `response.content` | `size`, `mimeType` (`x-unknown` when absent), `text`, `encoding`; a decoded body writes the decoded `text` and `size`, and `compression` = decoded minus wire bytes (when decoded whole) |
+| `response.bodySize` | the body size on the wire (`wire_size` for a decoded body); `Content-Encoding` stays in `headers` |
 | `timings` | `blocked` and `dns` -1; `connect` = TCP + TLS and `ssl` = TLS when this exchange opened the connection, else -1; `send` 0; `wait` until the response head; `receive` the rest. They add up to `time` |
 | `serverIPAddress`, `connection` | not recorded yet, so omitted |
 | `comment` on `postData` / `content` | set when the body was cut by `--body-limit`: the text holds only the start |
@@ -59,7 +91,9 @@ have no HAR form. The mapping:
 | `_error` | why the exchange failed |
 
 Import is best effort: unknown fields are ignored, missing ones get neutral values, `_tls`,
-`_flags` and `_error` are read back, and every flow gets the flag `imported`. Imported flows
+`_flags` and `_error` are read back, and every flow gets the flag `imported`. HAR text is the
+decoded body (HAR 1.2), so a body whose headers name a `Content-Encoding` is imported with
+`content_encoding.decoded: true` and `bodySize` as its `wire_size`. Imported flows
 have no client address (`0.0.0.0:0`). The file may be at most 512 MiB and 1,000,000 entries;
 anything that is not JSON shaped like a HAR document is an error naming line and column.
 
@@ -87,7 +121,7 @@ Quote values with spaces: `body:"free text"` (`\"` and `\\` escape inside quotes
 | `type:json` | response `Content-Type` contains it (`js` = javascript, `image`/`img` = `image/`) |
 | `header:content-type=json` | a request or response header with that name whose value contains the text |
 | `header:authorization` | the header is present |
-| `body:"free text"` | request or response body contains it (first 1 MiB of each stored body; base64 bodies are decoded) |
+| `body:"free text"` | request or response body contains it (first 1 MiB of each stored body, which is the decoded body for `Content-Encoding`; base64 bodies are decoded) |
 | `size:>10k` | response body size; `b`, `k`, `m`, `g` (powers of 1024) |
 | `time:>500ms` | total time; `ms` (default) or `s` |
 | `client:curl` | the known TLS client or the `User-Agent` contains it |
@@ -115,7 +149,8 @@ beyond that, and on any syntax error, the API answers 400 with
   holds `[]{}`), `--http2` or `--http1.1` after the client's protocol;
 - headers in the original order, without HTTP/2 pseudo headers, hop-by-hop headers and
   `Content-Length`; `Accept-Encoding` becomes `--compressed`; an empty header is sent as
-  `-H 'Name;'`;
+  `-H 'Name;'`; `Content-Encoding` is left out when the stored body is decoded, so the
+  command sends it as identity;
 - the body as `--data-binary`; binary bodies and text starting with `@` (which cURL would read
   as a file name) are piped in: `printf '%s' '...' | base64 -d | curl ... --data-binary @-`;
 - every argument that is not plain is single-quoted, so `$`, backticks, quotes, newlines and

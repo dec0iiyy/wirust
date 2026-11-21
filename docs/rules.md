@@ -117,6 +117,11 @@ Order inside one exchange: all matching `delay`s (summed), then rewrites, `map_r
   and the flow gets the `rewrite_skipped_body_too_large` flag. While any enabled body rule
   or breakpoint of a phase exists, every intercepted exchange of that phase is buffered (up
   to the limit).
+- A body with a `Content-Encoding` (gzip, deflate, br, zstd, or a list of them) is edited
+  decoded. When the edits change it, it goes on as identity: `Content-Encoding` is removed and
+  `Content-Length` set to the new size. When they change nothing, the original bytes go on.
+  A body that does not decode whole (unknown coding, invalid data, over 64 MiB decoded or the
+  1000:1 expansion cap) is left unchanged and the rule does not fire.
 - `throttle` never buffers: it releases about a tenth of a second's worth of bytes at a time.
 - `map_remote` without `port` but with `scheme` uses that scheme's default port.
 

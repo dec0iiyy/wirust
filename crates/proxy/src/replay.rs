@@ -99,6 +99,10 @@ impl Outgoing {
             headers.push((name, value));
         }
         headers.retain(|(name, _)| !edit.remove_headers.contains(name));
+        // The stored body is decoded; it goes as identity unless the edit names a coding.
+        if flow.request_body.is_decoded() {
+            headers.retain(|(name, _)| name != header::CONTENT_ENCODING);
+        }
         set_headers(&mut headers, edit.set_headers);
         let body = match edit.body {
             Some(body) => body,

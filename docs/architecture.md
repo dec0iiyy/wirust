@@ -17,6 +17,7 @@ built in parallel without editing the same functions.
 | `upstream_proxy.rs` | `--upstream-proxy`: URL and redaction, bypass list, HTTP CONNECT and SOCKS5 clients |
 | `body.rs` | `Tee` (bounded body copy for the log), `buffer`/`Prepend` (bounded buffering) |
 | `flow.rs` | the record types (`Event`, `Exchange`, `TlsFailure`, `Tunnel`, `Flag`) and the text log line |
+| `decode.rs` | `decode`: undoes `Content-Encoding` (gzip, deflate, br, zstd) on the captured copy of a body, capped by the body limit and an expansion ratio; `BodyRecord::from_capture` |
 | `events.rs` | `FlowEvent`, `Bus` (broadcast), `Flow` (record plus `schema_version`), `FlowStore` (ring buffer), `Filter` |
 | `intercept.rs` | `Interceptor`, `Action`, `Interceptors` (the chain), `Pauses`/`PauseHandle`, built-ins `HeaderRules`, `BlockHost` |
 | `control.rs` | `ControlPlane`: the `--ui` listener, JSON API, SSE, embedded UI, its security checks |
@@ -61,7 +62,9 @@ built in parallel without editing the same functions.
 With no interceptors the chain costs one `is_empty()` check; bodies are never buffered.
 
 The record shows what the client sent and what it received: request headers and body before
-interceptors, response status, headers and body after them.
+interceptors, response status, headers and body after them. Bodies sent with a
+`Content-Encoding` are stored decoded (`docs/interchange.md`, "Body records"); the bytes
+forwarded either way are the wire bytes.
 
 ## The flow schema
 

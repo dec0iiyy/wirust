@@ -28,8 +28,10 @@ anyhow = "1.0.104"
 # `certutil -delstore` and `security delete-certificate` identify a certificate by.
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.23.1"
+brotli-decompressor = { version = "6.3", default-features = false, features = ["std"] }
 bytes = "1.12.2"
 dirs = "7.0.0"
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
 fingerprint = { git = "https://github.com/dec0iiyy/mirrust", tag = "v0.1.6", version = "0.1.0" }
 http = "1.5.0"
 http-body = "1.1.0"
@@ -40,6 +42,7 @@ qrcode = { version = "0.15.0", default-features = false, features = ["std"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 regex = "1.12"
 rustls = "0.23.46"
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -47,6 +50,10 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "
 tokio-rustls = "0.26.6"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 webpki-roots = "1.0.12"
+
+[dev-dependencies]
+# Compresses test bodies; the proxy itself only decodes.
+brotli = { version = "9.1", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
