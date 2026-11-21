@@ -54,6 +54,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("../ui/index.html"),
     ),
     (
+        "/theme.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../ui/theme.js"),
+    ),
+    (
         "/panels.js",
         "text/javascript; charset=utf-8",
         include_bytes!("../ui/panels.js"),

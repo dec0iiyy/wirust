@@ -121,17 +121,30 @@ document.addEventListener("DOMContentLoaded", () => {
   // -------------------------------------------------------------------------
   // Toolbar: Export HAR, Connect, Breakpoints, Rules
 
-  const exportButton = button("Export HAR", null, exportHar);
+  /** A toolbar button: an icon (style.css `[data-icon]`) and a label that narrow windows hide. */
+  function toolButton(label, icon, cls, onClick) {
+    const b = button(null, cls, onClick);
+    b.dataset.icon = icon;
+    b.append(h("span", "btn-label", label));
+    b.setAttribute("aria-label", label);
+    return b;
+  }
+  const exportButton = toolButton("Export HAR", "export", null, exportHar);
   exportButton.title = "Download the flows matching the search as a HAR file";
-  const connectButton = button("Connect", null);
+  const connectButton = toolButton("Connect", "connect", null);
   connectButton.title = "How to point a client at the proxy";
-  const pauseButton = button("Breakpoints", "pause-button", () => openSide("pauses"));
+  const pauseButton = toolButton("Breakpoints", "pause", "pause-button", () => openSide("pauses"));
+  pauseButton.title = "Paused exchanges";
   const pauseCount = h("span", "pill", "0");
   pauseCount.hidden = true;
-  pauseButton.append(" ", pauseCount);
-  const rulesButton = button("Rules", null, () => openSide("rules"));
+  pauseButton.append(pauseCount);
+  const rulesButton = toolButton("Rules", "rules", null, () => openSide("rules"));
+  rulesButton.title = "Rules: block, map, rewrite, throttle, breakpoints";
   for (const b of [pauseButton, rulesButton]) b.setAttribute("aria-controls", "rules-slot");
-  actions.prepend(exportButton, connectButton, pauseButton, rulesButton);
+  // Grouped by meaning (index.html has the groups); an older page without them gets one row.
+  const group = (name) => actions.querySelector('[data-group="' + name + '"]') || actions;
+  group("share").append(exportButton, connectButton);
+  group("control").append(pauseButton, rulesButton);
 
   /** The token stays in the Authorization header: fetch, then save through a Blob. */
   async function exportHar() {
