@@ -9,9 +9,8 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
 3. Testing on real phones and on iOS: `docs/mobile.md` was tried only on the Android emulator.
 4. Passthrough patterns in the web UI (replay and compose are there).
 5. WebSocket: editing or dropping messages in flight (breakpoints on messages).
-6. gRPC with `.proto` files or server reflection (field names), and inflating compressed
-   messages (the body decoder in `decode.rs` could be reused); today messages are decoded
-   schema-less and compressed ones only listed.
+6. gRPC schemas from server reflection and compiled descriptor sets (`.proto` files through
+   `--proto` and inflating compressed messages are done, see docs/grpc.md).
 7. WebSocket over HTTP/2 (RFC 8441 extended CONNECT).
 8. SOCKS5 listener for clients that cannot use an HTTP proxy.
 9. Replay of a body that was compressed on the wire sends it as identity; re-encoding it would

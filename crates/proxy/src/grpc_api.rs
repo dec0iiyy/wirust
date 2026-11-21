@@ -1,6 +1,6 @@
-//! Control-plane route for decoded gRPC and protobuf messages:
-//! `GET /api/v1/flows/{id}/grpc`. `control::route` calls [`route`] after its Host, Origin and
-//! token checks.
+//! Control-plane routes for decoded gRPC and protobuf messages:
+//! `GET /api/v1/flows/{id}/grpc` and the loaded `.proto` schemas, `GET /api/v1/proto`.
+//! `control::route` calls [`route`] after its Host, Origin and token checks.
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -9,7 +9,8 @@ use serde::Serialize;
 
 use crate::events::{FlowStore, StoredFlow};
 use crate::flow::Event;
-use crate::grpc::{Call, decode_exchange};
+use crate::grpc::{Call, decode_exchange_with};
+use crate::schema::{Report, Schemas};
 
 /// The answer: the flow id and its decoded call.
 #[derive(Serialize)]
@@ -19,12 +20,17 @@ struct Answer {
     call: Call,
 }
 
-/// Answers `GET /api/v1/flows/{id}/grpc`; `None` leaves the request to `control::route`.
+/// Answers `GET /api/v1/flows/{id}/grpc` and `GET /api/v1/proto`; `None` leaves the request
+/// to `control::route`.
 pub(crate) fn route(
     store: &FlowStore,
+    schemas: Option<&Schemas>,
     method: &Method,
     segments: &[&str],
 ) -> Option<Response<Bytes>> {
+    if segments == ["proto"] {
+        return Some(proto(schemas, method));
+    }
     let ["flows", id, "grpc"] = segments else {
         return None;
     };
@@ -40,7 +46,7 @@ pub(crate) fn route(
     };
     let call = match &flow {
         StoredFlow::Done(flow) => match &flow.record {
-            Event::Exchange(x) => decode_exchange(x),
+            Event::Exchange(x) => decode_exchange_with(x, schemas),
             Event::TlsFailure(_) | Event::Tunnel(_) => None,
         },
         StoredFlow::Pending(_) => {
@@ -55,6 +61,25 @@ pub(crate) fn route(
     };
     let body = serde_json::to_vec(&Answer { flow_id: id, call }).unwrap_or_default();
     Some(respond(StatusCode::OK, Bytes::from(body)))
+}
+
+/// `GET /api/v1/proto`: the schema files (names only), services and methods; empty lists
+/// when no `--proto` was given.
+fn proto(schemas: Option<&Schemas>, method: &Method) -> Response<Bytes> {
+    if method != Method::GET {
+        return error(StatusCode::METHOD_NOT_ALLOWED, "wrong method");
+    }
+    let report = schemas.map_or_else(
+        || Report {
+            files: Vec::new(),
+            services: Vec::new(),
+            message: None,
+            error: None,
+        },
+        Schemas::report,
+    );
+    let body = serde_json::to_vec(&report).unwrap_or_default();
+    respond(StatusCode::OK, Bytes::from(body))
 }
 
 fn respond(status: StatusCode, body: Bytes) -> Response<Bytes> {
@@ -103,7 +128,7 @@ mod tests {
     #[test]
     fn answers_decoded_messages_for_grpc_flows_only() {
         let store = store();
-        let ok = route(&store, &Method::GET, &["flows", "1", "grpc"]).expect("handled");
+        let ok = route(&store, None, &Method::GET, &["flows", "1", "grpc"]).expect("handled");
         assert_eq!(ok.status(), StatusCode::OK);
         let value: serde_json::Value = serde_json::from_slice(ok.body()).expect("JSON");
         assert_eq!(value["flow_id"], 1);
@@ -116,12 +141,12 @@ mod tests {
             (&"varint".into(), &"42".into())
         );
         assert_eq!(value["truncated"], false);
-        let plain = route(&store, &Method::GET, &["flows", "2", "grpc"]).expect("handled");
+        let plain = route(&store, None, &Method::GET, &["flows", "2", "grpc"]).expect("handled");
         assert_eq!(plain.status(), StatusCode::NOT_FOUND);
-        let missing = route(&store, &Method::GET, &["flows", "x", "grpc"]).expect("handled");
+        let missing = route(&store, None, &Method::GET, &["flows", "x", "grpc"]).expect("handled");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        let post = route(&store, &Method::POST, &["flows", "1", "grpc"]).expect("handled");
+        let post = route(&store, None, &Method::POST, &["flows", "1", "grpc"]).expect("handled");
         assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert!(route(&store, &Method::GET, &["flows", "1"]).is_none());
+        assert!(route(&store, None, &Method::GET, &["flows", "1"]).is_none());
     }
 }

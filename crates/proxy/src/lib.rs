@@ -38,6 +38,7 @@ pub mod replay;
 mod replay_api;
 pub mod rules;
 mod rules_api;
+pub mod schema;
 pub mod session;
 pub mod sysproxy;
 pub mod throttle;
