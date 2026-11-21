@@ -800,9 +800,13 @@ function overview(panel, m) {
     return;
   }
   panel.append(h("h3", null, "Request"));
-  panel.append(h("div", "url", (f.method || "") + " " + f.url));
+  const method = h("span", "c-method url-method", f.method || "");
+  method.dataset.method = String(f.method || "").toUpperCase();
+  panel.append(h("div", "url", null, [method, " " + f.url]));
   if (f.error) panel.append(h("div", "error-box", "Error: " + f.error));
-  const status = f.status != null ? f.status + " " + (f.reason || "") : m.state === "pending" ? "in progress" : "";
+  const status = f.status != null
+    ? h("span", "status-pill s-" + Math.floor(f.status / 100), f.status + " " + (f.reason || ""))
+    : m.state === "pending" ? "in progress" : "";
   const flags = f.flags && f.flags.length
     ? h("span", null, null, f.flags.map((x) => h("span", x.startsWith("rule:") ? "badge rule" : "badge", x)))
     : null;

@@ -3,9 +3,10 @@
 Start the proxy with `--ui 127.0.0.1:8081` and open the link it prints
 (`http://127.0.0.1:8081/#token=...`). The UI is static files in `crates/proxy/ui/`
 (`index.html`, `app.js` for the list and detail pane, `panels.js` for the side panel and
-popovers, `style.css`, `ws.js` with `ws.css` for the WebSocket Messages tab, and `grpc.js`
-with `grpc.css` for the gRPC tab, see `docs/grpc.md`), embedded
-in the binary and listed in `control::ASSETS`. No build step, no dependencies.
+popovers, `style.css` with the design tokens, `theme.js` for the theme override, `ws.js`
+with `ws.css` for the WebSocket Messages tab, `grpc.js` with `grpc.css` for the gRPC tab,
+see `docs/grpc.md`, and `replay.js` with `replay.css`), embedded in the binary and listed
+in `control::ASSETS`. No build step, no dependencies.
 
 ## What it shows
 
@@ -14,8 +15,11 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   JA4 when no known client matches. The protocol is the client leg (`h2`, `http/1.1`), and
   when the server leg differs it follows an arrow (`h2→http/1.1`: an HTTP/2 client whose
   server speaks HTTP/1.1); the terminal log prints the same text. A row appears when the
-  request starts (grey, `pending`) and fills in when it ends. Status is coloured by class
-  and always written out as text. TLS handshake failures are red rows with the reason;
+  request starts (grey, `pending`) and fills in when it ends. The method is coloured
+  (GET, POST, PUT, PATCH, DELETE), the status is a pill coloured by class and always
+  written out as text, and the host dims its subdomains and port so the domain stands out
+  (the full host is the cell's tooltip). TLS handshake failures have a red bar at the left
+  edge and the reason in red in the Path column;
   tunnels say `tunnel`, and a TLS tunnel relayed by `--passthrough` shows the client from
   its ClientHello like a decrypted flow does.
 - Up to the store's 5000 flows stay smooth: only the visible rows are in the DOM.
@@ -115,6 +119,18 @@ in the binary and listed in `control::ASSETS`. No build step, no dependencies.
   15 s), or `token missing` / `token rejected: open the link printed in the terminal`.
 - `app.js` exposes `hooks.pause` (SSE events whose name starts with `pause`), `hooks.load`
   (after each load of the store) and `hooks.detail` (the shown flow) for `panels.js`.
+- **Toolbar**: the top row has the name, the buttons grouped by meaning (capture: Follow,
+  Clear; share: Export HAR, Connect; control: Breakpoints, Rules), the connection badge and
+  the theme button; the row below has the filter box (`/` focuses it), the quick filters and
+  the flow count. Below 1180 px the share and control buttons show only their icons (the
+  name stays in the tooltip and the accessible label), below 980 px the capture buttons
+  too, the `#` and Proto columns are dropped and the side panel floats over the list. The
+  page works down to about 760 px wide.
+- **Theme**: the page follows the system light or dark setting. The button at the right of
+  the toolbar cycles system, light, dark; `theme.js` sets `data-theme` on `<html>` before
+  the first paint and keeps the choice in `localStorage` (`wirust.theme`). When storage is
+  unavailable the choice lasts until the page reloads. Transitions are off under
+  `prefers-reduced-motion`.
 
 ## Adding a detail tab
 
@@ -134,6 +150,49 @@ window.registerTab({
 The tab gets the next number key (5, 6, ...). A script that runs before `app.js` pushes the
 same object onto `window.pendingTabs = []` instead. An exception in `render` is shown in the
 pane, not thrown.
+
+## Styling extensions
+
+A new panel, tab, menu or composer should look like the rest without its own colours.
+`style.css` defines the tokens on `:root`; each colour token holds both themes through
+`light-dark()`, so a rule that uses `var(--…)` follows the system setting and the theme
+button. Hard-coded colours and `@media (prefers-color-scheme)` blocks do not follow the
+button.
+
+- Surfaces: `--bg` (page), `--surface`, `--surface-2`, `--surface-3`, `--surface-overlay`
+  (popovers, dialogs), `--code-bg`; lines `--line`, `--line-strong`, `--field-border` (form
+  fields, 3:1 against the surfaces); rows `--row-alt`, `--row-hover`, `--sel`, `--sel-fg`.
+- Text: `--fg`, `--fg-muted`, `--fg-subtle` (all at least 4.5:1 on the surfaces), `--accent`.
+- Meaning: `--ok`, `--redirect`, `--client-err`, `--server-err` (`--danger`), `--pending`,
+  `--fail-bg`/`--fail-fg`, `--warn-bg`, `--hit`; methods `--m-get`, `--m-post`, `--m-put`,
+  `--m-patch`, `--m-delete`, `--m-other`; syntax `--syn-key`, `--syn-str`, `--syn-num`,
+  `--syn-lit`, `--syn-punct`.
+- Scale: spacing `--sp-1` to `--sp-7` (2, 4, 6, 8, 12, 16, 24 px), radii `--r-1`, `--r-2`,
+  `--r-3`, `--r-pill`, type `--fs-xs` to `--fs-xl` (11 to 18 px), fonts `--sans`, `--mono`,
+  elevation `--shadow-1`, `--shadow-2`, motion `--t-fast`, `--t-med`, `--ease`.
+
+Generic classes to reuse instead of new one-off selectors:
+
+| Class | Use |
+|---|---|
+| plain `<button>` | the default bordered button; add `primary`, `danger`, `ghost` or `mini` |
+| `data-icon="export"` (`follow`, `clear`, `connect`, `pause`, `rules`) | a 16 px icon before the label |
+| `toggle` with `aria-pressed` | an on/off button; `toggle switch` for the rule switches |
+| `segmented` (or `chips`) holding `chip` buttons with `aria-pressed` | a quiet segmented filter |
+| `surface` | a raised box: overlay background, border, `--r-3` radius, `--shadow-2` |
+| `popover`, `popover menu` (or `menu`) | a floating panel; a list of actions in it |
+| `badge`, `badge rule` | a small rounded label |
+| `hint`, `notice`, `error-box` | muted text, a warning line, an error block |
+| `url`, `pre.text`, `pre.hex`, `json` | code-like blocks |
+| `table.headers` with `h-name`, `h-value`, `h-copy` | a name/value table (the copy button shows on hover or focus) |
+| `dl.kv` | label and value pairs |
+| `kbd` | a key hint |
+| `field` on `input`/`select` | a compact form field (inputs without a class get the same look) |
+
+A button in the detail pane's toolbar (next to Copy as cURL) goes into `.detail-actions`
+and needs no class; a toolbar button goes into the matching `.btn-group[data-group]`
+(`capture`, `share`, `control`) with `data-icon` and its label in `<span class="btn-label">`
+so narrow windows can hide the label.
 
 ## Keys
 
