@@ -344,6 +344,115 @@ pub struct PauseInfo {
     pub phase: Phase,
 }
 
+/// What a pause holds, so the control plane can show it before it is edited.
+#[derive(Debug, Clone)]
+pub struct Paused {
+    /// The request as it would go to the server (after the earlier interceptors).
+    pub request: PausedRequest,
+    /// The response as it would go to the client; `None` for a request pause.
+    pub response: Option<PausedResponse>,
+}
+
+/// The request half of a [`Paused`] exchange.
+#[derive(Debug, Clone)]
+pub struct PausedRequest {
+    /// Request method.
+    pub method: Method,
+    /// Absolute URL of the server the request goes to.
+    pub url: String,
+    /// Request headers.
+    pub headers: HeaderMap,
+    /// Request body.
+    pub body: PausedBody,
+}
+
+/// The response half of a [`Paused`] exchange.
+#[derive(Debug, Clone)]
+pub struct PausedResponse {
+    /// Response status.
+    pub status: StatusCode,
+    /// Response headers.
+    pub headers: HeaderMap,
+    /// Response body.
+    pub body: PausedBody,
+}
+
+/// A paused body, as far as the proxy buffered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PausedBody {
+    /// The whole body.
+    Whole(Bytes),
+    /// The body is larger than the proxy's body limit; it streams on unchanged unless an
+    /// edit replaces it.
+    TooLarge,
+    /// No interceptor asked for the body, so it was not buffered.
+    NotBuffered,
+}
+
+impl PausedBody {
+    fn of(body: Option<&Bytes>, flags: &[Flag]) -> Self {
+        match body {
+            Some(bytes) => Self::Whole(bytes.clone()),
+            None if flags.contains(&Flag::RewriteSkippedBodyTooLarge) => Self::TooLarge,
+            None => Self::NotBuffered,
+        }
+    }
+}
+
+impl Paused {
+    /// The request of `ctx`, before it goes to the server.
+    #[must_use]
+    pub fn of_request(ctx: &RequestCtx) -> Self {
+        Self {
+            request: PausedRequest::of(ctx),
+            response: None,
+        }
+    }
+
+    /// The exchange of `request` and `response`, before the response goes to the client.
+    #[must_use]
+    pub fn of_response(request: &RequestCtx, response: &ResponseCtx) -> Self {
+        Self {
+            request: PausedRequest::of(request),
+            response: Some(PausedResponse {
+                status: response.status,
+                headers: response.headers.clone(),
+                body: PausedBody::of(response.body.as_ref(), &response.flags),
+            }),
+        }
+    }
+}
+
+impl PausedRequest {
+    fn of(ctx: &RequestCtx) -> Self {
+        let host = if ctx.host.contains(':') {
+            format!("[{}]", ctx.host)
+        } else {
+            ctx.host.clone()
+        };
+        let default_port = if ctx.scheme == "https" { 443 } else { 80 };
+        let url = if ctx.port == default_port {
+            format!("{}://{host}{}", ctx.scheme, ctx.path)
+        } else {
+            format!("{}://{host}:{}{}", ctx.scheme, ctx.port, ctx.path)
+        };
+        Self {
+            method: ctx.method.clone(),
+            url,
+            headers: ctx.headers.clone(),
+            body: PausedBody::of(ctx.body.as_ref(), &ctx.flags),
+        }
+    }
+}
+
+/// One registry entry: what the list shows, what the pause holds, and the waiter.
+#[derive(Debug)]
+struct Pending {
+    info: PauseInfo,
+    detail: Option<Arc<Paused>>,
+    sender: oneshot::Sender<Resolution>,
+}
+
 /// The pending pauses, shared by the interceptors that create them and the control plane
 /// that resolves them. Cloning is cheap.
 #[derive(Debug, Clone, Default)]
@@ -354,7 +463,7 @@ pub struct Pauses {
 #[derive(Debug, Default)]
 struct PausesInner {
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, (PauseInfo, oneshot::Sender<Resolution>)>>,
+    pending: Mutex<HashMap<u64, Pending>>,
     /// Where [`FlowEvent::Paused`] and [`FlowEvent::Resumed`] go, once attached.
     bus: std::sync::OnceLock<Bus>,
 }
@@ -375,11 +484,28 @@ impl Pauses {
     /// Registers a pause of `flow_id` and returns the handle to put in [`Action::Pause`].
     #[must_use]
     pub fn pause(&self, flow_id: u64, phase: Phase) -> PauseHandle {
+        self.register(flow_id, phase, None)
+    }
+
+    /// Like [`pause`](Self::pause), and keeps `detail` for [`detail`](Self::detail).
+    #[must_use]
+    pub fn pause_with(&self, flow_id: u64, phase: Phase, detail: Paused) -> PauseHandle {
+        self.register(flow_id, phase, Some(Arc::new(detail)))
+    }
+
+    fn register(&self, flow_id: u64, phase: Phase, detail: Option<Arc<Paused>>) -> PauseHandle {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (sender, receiver) = oneshot::channel();
         let info = PauseInfo { id, flow_id, phase };
         self.publish(&info, None);
-        self.lock().insert(id, (info.clone(), sender));
+        self.lock().insert(
+            id,
+            Pending {
+                info: info.clone(),
+                detail,
+                sender,
+            },
+        );
         PauseHandle {
             id,
             info,
@@ -391,7 +517,15 @@ impl Pauses {
     /// The phase of pending pause `id`.
     #[must_use]
     pub fn phase(&self, id: u64) -> Option<Phase> {
-        self.lock().get(&id).map(|(info, _)| info.phase)
+        self.lock().get(&id).map(|pending| pending.info.phase)
+    }
+
+    /// Pending pause `id` and what it holds (`None` when it was registered without detail).
+    #[must_use]
+    pub fn detail(&self, id: u64) -> Option<(PauseInfo, Option<Arc<Paused>>)> {
+        self.lock()
+            .get(&id)
+            .map(|pending| (pending.info.clone(), pending.detail.clone()))
     }
 
     fn publish(&self, info: &PauseInfo, resolution: Option<&Resolution>) {
@@ -408,24 +542,26 @@ impl Pauses {
 
     /// Resolves pause `id`. Returns `false` when there is no such pending pause.
     pub fn resolve(&self, id: u64, resolution: Resolution) -> bool {
-        let Some((_, sender)) = self.lock().remove(&id) else {
+        let Some(pending) = self.lock().remove(&id) else {
             return false;
         };
         // The waiter may have timed out a moment ago; then the decision is moot.
-        sender.send(resolution).is_ok()
+        pending.sender.send(resolution).is_ok()
     }
 
     /// The pending pauses, by id.
     #[must_use]
     pub fn list(&self) -> Vec<PauseInfo> {
-        let mut list: Vec<PauseInfo> = self.lock().values().map(|(info, _)| info.clone()).collect();
+        let mut list: Vec<PauseInfo> = self
+            .lock()
+            .values()
+            .map(|pending| pending.info.clone())
+            .collect();
         list.sort_by_key(|info| info.id);
         list
     }
 
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<u64, (PauseInfo, oneshot::Sender<Resolution>)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Pending>> {
         self.inner
             .pending
             .lock()
@@ -709,6 +845,29 @@ mod tests {
         let resolution = handle.wait(Duration::from_millis(20)).await;
         assert_eq!(resolution, Resolution::TimedOut);
         assert_eq!(pauses.list(), []);
+    }
+
+    #[test]
+    fn a_paused_request_has_an_absolute_url_and_knows_a_skipped_body() {
+        let mut request = ctx("::1");
+        request.port = 8443;
+        request.path = "/a?b=1".to_owned();
+        request.flags.push(Flag::RewriteSkippedBodyTooLarge);
+        let paused = Paused::of_request(&request);
+        assert_eq!(paused.request.url, "https://[::1]:8443/a?b=1");
+        assert_eq!(paused.request.body, PausedBody::TooLarge);
+        let mut request = ctx("x.test");
+        request.body = Some(Bytes::from_static(b"hi"));
+        let paused = Paused::of_request(&request);
+        assert_eq!(paused.request.url, "https://x.test/");
+        assert_eq!(
+            paused.request.body,
+            PausedBody::Whole(Bytes::from_static(b"hi"))
+        );
+        assert_eq!(
+            Paused::of_request(&ctx("x.test")).request.body,
+            PausedBody::NotBuffered
+        );
     }
 
     #[test]

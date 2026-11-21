@@ -115,7 +115,8 @@ Order inside one exchange: all matching `delay`s (summed), then rewrites, `map_r
   A body that is not JSON is left as it is.
 - Body rules buffer the body up to `--body-limit`. A larger body streams through unchanged
   and the flow gets the `rewrite_skipped_body_too_large` flag. While any enabled body rule
-  exists, every intercepted exchange of that phase is buffered (up to the limit).
+  or breakpoint of a phase exists, every intercepted exchange of that phase is buffered (up
+  to the limit).
 - `throttle` never buffers: it releases about a tenth of a second's worth of bytes at a time.
 - `map_remote` without `port` but with `scheme` uses that scheme's default port.
 
@@ -136,8 +137,30 @@ limited to 1 MiB.
 | `PUT /api/v1/rules` | replaces the whole set from `{"rules": [...]}` (the TOML shape in JSON); `400 {"error"}` leaves the set unchanged. Exchanges in flight keep the set they started with. The file, when watched, wins again on its next change. |
 | `POST /api/v1/rules/{name}/toggle` | flips `enabled`; `{"name", "enabled"}`, `404` for no such rule |
 | `GET /api/v1/pauses` | pending pauses: `[{"id", "flow_id", "phase"}]` |
+| `GET /api/v1/pauses/{id}` | what the pause holds (below); `404` once it is resolved |
 | `POST /api/v1/pauses/{id}/resume`, `/abort` | go on unchanged, or answer `502` |
 | `POST /api/v1/pauses/{id}/edit` | apply an edit, then go on (below) |
+
+`GET /api/v1/pauses/{id}` returns the request as it would go to the server (after the
+rules before the breakpoint ran) and, for a response pause, the response:
+
+```json
+{
+  "id": 2, "flow_id": 7, "phase": "response",
+  "request": { "method": "POST", "url": "https://api.example/x", "headers": [["x-a", "1"]],
+               "body": { "state": "whole", "size": 12, "binary": false, "truncated": false, "text": "..." } },
+  "response": { "status": 200, "headers": [["content-type", "text/plain"]],
+                "body": { "state": "too_large" } }
+}
+```
+
+`response` is `null` for a request pause. A body's `state` is `whole`, `too_large` (over
+`--body-limit`: not buffered, it streams on unchanged unless an edit sets a new body) or
+`not_buffered`. A whole body comes as `text` when it is UTF-8 (at most 256 KiB, cut at a
+character boundary) or as `base64` of its first 4 KiB when it is not; `truncated` says
+whether anything was cut. Breakpoint rules make the proxy buffer request bodies (rules
+with `request = true`) and response bodies (`response = true`) up to `--body-limit`, as
+body rewrites do, so a pause can show them.
 
 The edit body:
 

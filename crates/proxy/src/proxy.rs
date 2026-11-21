@@ -897,7 +897,8 @@ where
         match body::buffer(tee, state.body_limit).await {
             Ok(Buffered::Whole(bytes)) => req.body = Some(bytes),
             Ok(Buffered::TooLarge(rest)) => {
-                record.flags.push(Flag::RewriteSkippedBodyTooLarge);
+                // On the context, so a breakpoint can tell; it reaches the record below.
+                req.flags.push(Flag::RewriteSkippedBodyTooLarge);
                 body = Some(boxed(rest));
             }
             Err(e) => return Err(Stop::Fail(error_chain(&*e.into()))),
@@ -950,7 +951,7 @@ async fn intercept_response(
         match body::buffer(incoming, state.body_limit).await? {
             Buffered::Whole(bytes) => ctx.body = Some(bytes),
             Buffered::TooLarge(rest) => {
-                record.flags.push(Flag::RewriteSkippedBodyTooLarge);
+                ctx.flags.push(Flag::RewriteSkippedBodyTooLarge);
                 body = Some(boxed(rest));
             }
         }

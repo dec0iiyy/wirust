@@ -394,11 +394,80 @@ document.addEventListener("DOMContentLoaded", () => {
       replaceBody: false,
       bodyMode: "text",
       body: "",
+      // Filled from GET /api/v1/pauses/{id}: what the pause really holds.
+      detail: "loading",  // "loading" | "ok" | "none" (no detail) | "failed"
+      origMethod: null,
+      origUrl: null,
+      origStatus: "",
+      bodyInfo: null,      // {state, size, binary, truncated, text | base64}
+      bodyEditable: false,
+      origBody: "",
     };
   }
 
+  /** Fetches what pause `d` holds and puts it in the draft, unless the draft moved on. */
+  async function loadDetail(d) {
+    try {
+      const detail = await apiJson("pauses/" + d.pauseId);
+      if (draft !== d) return;
+      applyDetail(d, detail);
+    } catch (_) {
+      if (draft !== d) return;
+      d.detail = "failed";
+    }
+    if (draft === d && pauseSel === d.pauseId && !editing() && !slot.hidden && side === "pauses") renderPauses();
+  }
+
+  function applyDetail(d, detail) {
+    const half = detail.phase === "response" ? detail.response : detail.request;
+    if (!half) { d.detail = "none"; return; }
+    d.detail = "ok";
+    const rows = (half.headers || []).filter(([k]) => !k.startsWith(":")).map(([k, v]) => ({ name: k, value: v }));
+    d.headers = rows;
+    d.original = rows.map((x) => ({ name: x.name, value: x.value }));
+    d.removed = [];
+    if (detail.phase === "request") {
+      d.method = d.origMethod = half.method;
+      d.url = d.origUrl = half.url;
+    } else {
+      d.status = d.origStatus = String(half.status);
+    }
+    d.bodyInfo = half.body;
+    const b = half.body || {};
+    d.bodyEditable = b.state === "whole" && !b.binary && !b.truncated;
+    d.body = d.origBody = d.bodyEditable ? b.text : "";
+  }
+
+  /** What the pause says about its body, above the editor. */
+  function bodyNotice(d) {
+    const b = d.bodyInfo;
+    if (d.detail === "loading") return [h("p", "hint", "Loading the paused body...")];
+    if (!b || b.state === "not_buffered") {
+      return [h("p", "hint", "The current body was not captured; leave Replace off to keep it.")];
+    }
+    if (b.state === "too_large") {
+      return [h("p", "notice", "The body is larger than the proxy's body limit (--body-limit), so it is " +
+        "not shown. It goes on unchanged unless you replace it.")];
+    }
+    if (b.binary) {
+      const parts = [h("p", "notice", "binary, " + b.size + " bytes, not editable" +
+        (b.truncated ? " (first " + fmtSize(4096) + " shown)" : ""))];
+      parts.push(hexDump(bodyBytes({ encoding: "base64", data: b.base64 || "" })));
+      return parts;
+    }
+    return [
+      h("p", "notice", b.size + " bytes; only the start is shown, read-only. It goes on unchanged " +
+        "unless you replace it."),
+      h("pre", "text pause-preview", b.text || ""),
+    ];
+  }
+
   function editor(p) {
-    if (!draft || draft.pauseId !== p.id || (draft.incomplete && flows.has(p.flow_id))) draft = makeDraft(p);
+    if (!draft || draft.pauseId !== p.id ||
+      (draft.incomplete && draft.detail !== "ok" && flows.has(p.flow_id))) {
+      draft = makeDraft(p);
+      loadDetail(draft);
+    }
     const d = draft;
     const box = h("div", "pause-editor");
     box.append(h("h3", null, (p.phase === "request" ? "Request" : "Response") + " of flow #" + p.flow_id));
@@ -415,12 +484,25 @@ document.addEventListener("DOMContentLoaded", () => {
       status.inputMode = "numeric";
       status.setAttribute("aria-label", "Status");
       box.append(h("div", "field-row", null, [h("label", null, "Status "), status]));
-      box.append(h("p", "hint", "The response is shown only after it is released: headers you add here " +
-        "are set, names under Remove are removed, the rest stays as the server sent it."));
+      if (d.detail !== "ok") {
+        box.append(h("p", "hint", "Headers you add here are set, names under Remove are removed, the " +
+          "rest stays as the server sent it."));
+      }
     }
-    box.append(h("h3", null, p.phase === "request" ? "Headers" : "Set headers"));
+    box.append(h("h3", null, p.phase === "request" || d.detail === "ok" ? "Headers" : "Set headers"));
     box.append(headerEditor(d, p.phase));
     box.append(h("h3", null, "Body"));
+    if (d.bodyEditable) {
+      const text = h("textarea", "body-input");
+      text.value = d.body;
+      text.spellcheck = false;
+      text.setAttribute("aria-label", "Body");
+      text.addEventListener("input", () => { d.body = text.value; });
+      box.append(h("p", "hint", d.bodyInfo.size + " bytes of text. Changes replace the body; Content-Length is set again."));
+      box.append(text);
+      return finishEditor(box, p);
+    }
+    box.append(...bodyNotice(d));
     const replace = h("input");
     replace.type = "checkbox";
     replace.checked = d.replaceBody;
@@ -453,8 +535,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const label = h("label", null, "Replace the body");
     label.htmlFor = "replace-body";
     box.append(h("div", "field-row", null, [replace, label, mode]));
-    box.append(h("p", "hint", "The current body is not visible while paused; leave this off to keep it."));
     box.append(area);
+    return finishEditor(box, p);
+  }
+
+  /** The error line and the resolve buttons under the editor. */
+  function finishEditor(box, p) {
     const err = h("div", "error-box", pauseError);
     err.setAttribute("role", "alert");
     err.hidden = !pauseError;
@@ -491,7 +577,7 @@ document.addEventListener("DOMContentLoaded", () => {
     table.append(tbody);
     const add = button("Add header", "mini", () => { d.headers.push({ name: "", value: "" }); renderPauses(); });
     const parts = [table, h("div", "body-bar", null, [add])];
-    if (phase === "response") {
+    if (phase === "response" && d.detail !== "ok") {
       const removed = input(d.removed.join(", "), (v) => { d.removed = v.split(",").map((s) => s.trim()).filter(Boolean); }, "remove-input");
       removed.placeholder = "set-cookie, x-powered-by";
       removed.setAttribute("aria-label", "Headers to remove, comma separated");
@@ -506,9 +592,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const m = flows.get(p.flow_id);
     const f = m ? m.raw : {};
     if (p.phase === "request") {
-      if (d.method.trim() && d.method.trim() !== f.method) body.method = d.method.trim();
-      if (d.url.trim() && d.url.trim() !== f.url) body.url = d.url.trim();
-    } else if (d.status.trim()) {
+      const method = d.origMethod === null ? f.method : d.origMethod;
+      const url = d.origUrl === null ? f.url : d.origUrl;
+      if (d.method.trim() && d.method.trim() !== method) body.method = d.method.trim();
+      if (d.url.trim() && d.url.trim() !== url) body.url = d.url.trim();
+    } else if (d.status.trim() && d.status.trim() !== d.origStatus) {
       body.status = Number(d.status.trim());
     }
     const finalRows = d.headers.filter((x) => x.name.trim());
@@ -527,7 +615,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const remove = [...before.keys()].filter((k) => !grouped.has(k)).concat(d.removed);
     if (Object.keys(set).length) body.set_headers = set;
     if (remove.length) body.remove_headers = remove;
-    if (d.replaceBody) {
+    if (d.bodyEditable) {
+      if (d.body !== d.origBody) body.body = d.body;
+    } else if (d.replaceBody) {
       if (d.bodyMode === "base64") body.body_base64 = d.body.replace(/\s+/g, "");
       else body.body = d.body;
     }
