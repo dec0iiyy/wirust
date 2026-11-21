@@ -1,0 +1,69 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+#
+#   cargo deny check
+
+[graph]
+# The platforms CI and the release workflow build and test on. Without this, cargo-deny also
+# walks target-specific dependencies that no supported build compiles.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# A yanked version is a version its author withdrew; fail on it.
+yanked = "deny"
+# Fail on RustSec "unmaintained" notices for any crate in the graph, direct or transitive.
+unmaintained = "all"
+# Add an entry here, with a reason and an expiry, only for an advisory that was reviewed and
+# does not reach our code:
+#   ignore = [{ id = "RUSTSEC-0000-0000", reason = "...", expiry = "2027-01-31" }]
+ignore = []
+
+[licenses]
+# Permissive licences, plus the two weak or data licences the graph needs (listed as
+# exceptions below, per crate). A dependency under any other licence fails the check.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# This workspace and the `fingerprint` git dependency are GPL-3.0-only; the exception names
+# exactly these two crates, so no other GPL crate can slip in.
+[[licenses.exceptions]]
+crate = "wirust"
+allow = ["GPL-3.0-only"]
+
+[[licenses.exceptions]]
+crate = "fingerprint"
+allow = ["GPL-3.0-only"]
+
+# `option-ext` (via `dirs`) is MPL-2.0: file-level copyleft, unmodified use is fine.
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+# `webpki-roots` ships the Mozilla root list under a permissive data licence.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[bans]
+# Two versions of one crate are a cost (compile time, binary size), not an error.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io plus the one pinned git dependency (the `fingerprint` crate).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/dec0iiyy/mirrust"]

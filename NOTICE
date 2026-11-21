@@ -1,0 +1,21 @@
+wirust
+Copyright (C) the wirust contributors
+
+wirust is licensed under the GNU General Public License version 3 only
+(GPL-3.0-only). See the LICENSE file for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+wirust uses the `fingerprint` crate of mirrust (https://github.com/dec0iiyy/mirrust),
+licensed under GPL-3.0-only. Its known-client dataset, compiled into the binary, holds
+fingerprints taken from the BSD-3-Clause licensed uTLS
+(https://github.com/refraction-networking/utls) and from the MIT licensed test signatures
+of curl-impersonate (https://github.com/lexiforest/curl-impersonate, copyright (c)
+curl_cffi developers).
+
+The other Rust crates linked into the binary are under permissive licences (MIT,
+Apache-2.0, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0), except
+`option-ext`, which is MPL-2.0 and used unmodified. Their copyright notices and licence texts are in THIRD-PARTY-LICENSES.md, which ships with every
+release archive.

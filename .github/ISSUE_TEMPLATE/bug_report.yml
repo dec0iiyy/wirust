@@ -1,0 +1,48 @@
+name: Bug report
+description: wirust crashes, shows something wrong, or the documentation does not match what happens.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: One or two sentences. Paste error text or log lines in the box below.
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How do you run wirust?
+      options:
+        - Release binary
+        - install.sh
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The release tag, or the output of `git rev-parse --short HEAD`.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 x86_64, macOS 15 arm64, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: client
+    attributes:
+      label: Command line and client
+      description: The flags you started wirust with, and the client (browser and version, `curl --version`, phone and OS version, library).
+      render: console
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: What wirust printed, or the flow from the UI. Remove tokens, cookies, passwords and anything else private first.
+      render: text

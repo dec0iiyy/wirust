@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script src="/panels.js" defer></script>
+<title>Flows</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+<link rel="stylesheet" href="/ws.css">
+<script src="/ws.js" defer></script>
+</head>
+<body>
+<header class="toolbar" role="banner">
+  <div class="search">
+    <label for="search" class="visually-hidden">Filter flows</label>
+    <input id="search" type="search" autocomplete="off" spellcheck="false"
+      placeholder="Filter  ( / )   host:api  method:POST  status:4xx  type:json  text"
+      aria-describedby="search-help">
+    <span id="search-help" class="visually-hidden">Tokens host:, method:, status:, type:; other words match the URL and headers. Press Escape to clear.</span>
+  </div>
+  <div class="chips" role="group" aria-label="Quick filters">
+    <button type="button" class="chip" data-chip="errors" aria-pressed="false">Errors</button>
+    <button type="button" class="chip" data-chip="slow" aria-pressed="false" title="1 s or longer">Slow</button>
+    <button type="button" class="chip" data-chip="json" aria-pressed="false">JSON</button>
+    <button type="button" class="chip" data-chip="images" aria-pressed="false">Images</button>
+    <button type="button" class="chip" data-chip="tls" aria-pressed="false">TLS failures</button>
+  </div>
+  <div class="actions">
+    <button type="button" id="follow" class="toggle" aria-pressed="true" title="Keep the newest flow in view">Follow</button>
+    <button type="button" id="clear" title="Hide the flows loaded so far (the proxy keeps them)">Clear</button>
+    <span id="count" class="count" aria-live="polite"></span>
+    <span id="conn" class="conn" data-state="connecting" role="status">connecting</span>
+  </div>
+</header>
+
+<main class="workspace">
+  <section class="list" aria-label="Flows">
+    <div class="grid-head" id="grid-head" role="group" aria-label="Sort by column">
+      <button type="button" data-sort="id" class="c-id" aria-sort="ascending">#</button>
+      <button type="button" data-sort="time" class="c-time">Time</button>
+      <button type="button" data-sort="method" class="c-method">Method</button>
+      <button type="button" data-sort="host" class="c-host">Host</button>
+      <button type="button" data-sort="path" class="c-path">Path</button>
+      <button type="button" data-sort="status" class="c-status">Status</button>
+      <button type="button" data-sort="proto" class="c-proto">Proto</button>
+      <button type="button" data-sort="size" class="c-size">Size</button>
+      <button type="button" data-sort="duration" class="c-dur">Time ms</button>
+      <button type="button" data-sort="client" class="c-client">Client</button>
+    </div>
+    <div id="viewport" class="viewport" role="grid" tabindex="0" aria-label="Flow list" aria-rowcount="0">
+      <div id="spacer" class="spacer"></div>
+      <p id="empty" class="empty">No flows yet. Send traffic through the proxy.</p>
+    </div>
+  </section>
+
+  <div id="splitter" class="splitter" role="separator" aria-orientation="horizontal"
+    aria-label="Resize the detail pane" tabindex="0"></div>
+
+  <section id="detail" class="detail" aria-label="Flow detail">
+    <div class="detail-head">
+      <div class="tabs" role="tablist" aria-label="Detail">
+        <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-selected="true">Overview</button>
+        <button type="button" role="tab" id="tab-tls" data-tab="tls" aria-selected="false">Client TLS</button>
+        <button type="button" role="tab" id="tab-request" data-tab="request" aria-selected="false">Request</button>
+        <button type="button" role="tab" id="tab-response" data-tab="response" aria-selected="false">Response</button>
+      </div>
+      <div class="detail-actions">
+        <!-- Replay / Compose: shown when window.WIRUST_REPLAY exists; its owner fills it. -->
+        <span id="replay-slot" class="replay-slot" hidden></span>
+        <button type="button" id="copy-curl" disabled>Copy as cURL</button>
+        <button type="button" id="copy-url" disabled>Copy URL</button>
+      </div>
+    </div>
+    <div id="panel" class="panel" role="tabpanel" tabindex="0">
+      <p class="hint">Select a flow. Keys: j / k or arrows move, / searches, Esc clears, 1-4 switch tabs.</p>
+    </div>
+  </section>
+
+  <!-- Breakpoints and rules: panels.js fills this side panel. -->
+  <aside id="rules-slot" class="rules-slot" aria-label="Breakpoints and rules" data-owner="rules" hidden></aside>
+</main>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

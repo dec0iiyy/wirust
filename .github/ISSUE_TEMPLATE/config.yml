@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/dec0iiyy/wirust/security/advisories/new
+    about: Something that lets others read or steer intercepted traffic, use the proxy or the API, or crash it. Report it privately.

@@ -1,0 +1,49 @@
+[package]
+name = "wirust"
+description = "Single-binary HTTPS debugging proxy with a web UI: decrypts TLS with a local CA, shows each client's TLS fingerprint (JA4, JA3)"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/dec0iiyy/wirust"
+homepage = "https://github.com/dec0iiyy/wirust"
+readme = "../../README.md"
+keywords = ["proxy", "https", "debugging", "mitm", "ja4"]
+categories = ["command-line-utilities", "development-tools::debugging", "network-programming"]
+# Not on crates.io yet: crates.io refuses git dependencies, and `fingerprint` comes from the
+# mirrust repository until it is published there as `mirrust-fingerprint`.
+publish = false
+
+[lib]
+name = "wirust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wirust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+bytes = "1.12.2"
+dirs = "7.0.0"
+fingerprint = { git = "https://github.com/dec0iiyy/mirrust", tag = "v0.1.6", version = "0.1.0" }
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+qrcode = { version = "0.15.0", default-features = false, features = ["std"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+regex = "1.12"
+rustls = "0.23.46"
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+tokio-rustls = "0.26.6"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
+webpki-roots = "1.0.12"
+
+[lints]
+workspace = true

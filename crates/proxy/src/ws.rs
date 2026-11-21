@@ -1,0 +1,981 @@
+//! WebSocket capture (RFC 6455): a frame-aware pump that forwards the bytes of an upgraded
+//! connection unchanged while it records the messages in each direction.
+//!
+//! The pump writes every chunk it reads to the other side first and parses a copy after, so
+//! parsing never delays or changes the traffic. The parser is incremental and bounded: a
+//! message keeps at most [`WsLimits::body_limit`] bytes (the rest is only counted), a message
+//! may have at most [`MAX_FRAGMENTS`] frames, a frame header is at most 14 bytes, and any
+//! protocol violation stops parsing for that direction while the raw bytes keep flowing.
+//! See `docs/websocket.md`.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::Engine as _;
+use http::HeaderMap;
+use http::header;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+
+use crate::clock::Utc;
+use crate::events::{Bus, FlowEvent};
+
+/// Default bytes kept per message (`--ws-body-limit`); the rest is counted.
+pub const DEFAULT_WS_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Default messages kept per flow (`--ws-max-messages`); older ones are dropped.
+pub const DEFAULT_WS_MAX_MESSAGES: usize = 1000;
+
+/// Frames one message may span before the parser gives up on that direction. Real clients
+/// fragment into a handful of frames; this only stops a peer that streams empty fragments.
+pub const MAX_FRAGMENTS: usize = 65_536;
+
+/// Largest frame header: 2 bytes, an 8-byte length and a 4-byte mask.
+const MAX_HEADER: usize = 14;
+
+/// Largest control frame payload (RFC 6455 section 5.5).
+const MAX_CONTROL: u64 = 125;
+
+/// Bytes the pump reads at a time per direction.
+const CHUNK: usize = 16 * 1024;
+
+/// Most messages one `GET /api/v1/flows/{id}/messages` returns.
+pub const MAX_PAGE: usize = 1000;
+
+/// Capture limits, set from `--ws-body-limit` and `--ws-max-messages`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLimits {
+    /// Bytes kept per message.
+    pub body_limit: usize,
+    /// Messages kept per flow.
+    pub max_messages: usize,
+}
+
+impl Default for WsLimits {
+    fn default() -> Self {
+        Self {
+            body_limit: DEFAULT_WS_BODY_LIMIT,
+            max_messages: DEFAULT_WS_MAX_MESSAGES,
+        }
+    }
+}
+
+/// Which way a message went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// From the client to the server; these frames are masked.
+    ClientToServer,
+    /// From the server to the client; these frames are not masked.
+    ServerToClient,
+}
+
+/// What a message is, from its first frame's opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Opcode 1.
+    Text,
+    /// Opcode 2.
+    Binary,
+    /// Opcode 8.
+    Close,
+    /// Opcode 9.
+    Ping,
+    /// Opcode 10.
+    Pong,
+}
+
+impl Kind {
+    /// The RFC 6455 opcode.
+    #[must_use]
+    pub fn opcode(self) -> u8 {
+        match self {
+            Self::Text => 1,
+            Self::Binary => 2,
+            Self::Close => 8,
+            Self::Ping => 9,
+            Self::Pong => 10,
+        }
+    }
+
+    /// The kind for a non-continuation opcode.
+    #[must_use]
+    pub fn from_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode {
+            1 => Self::Text,
+            2 => Self::Binary,
+            8 => Self::Close,
+            9 => Self::Ping,
+            10 => Self::Pong,
+            _ => return None,
+        })
+    }
+
+    fn is_control(self) -> bool {
+        matches!(self, Self::Close | Self::Ping | Self::Pong)
+    }
+}
+
+/// How [`WsMessage::data`] is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Encoding {
+    /// The bytes are valid UTF-8 and `data` is that text.
+    Utf8,
+    /// `data` is standard base64 of the bytes.
+    Base64,
+}
+
+/// One recorded WebSocket message, as the API, the event stream and HAR carry it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WsMessage {
+    /// The upgrade exchange this message belongs to.
+    pub flow_id: u64,
+    /// Position in the connection, both directions counted, from 0.
+    pub seq: u64,
+    /// When the message's last frame arrived, RFC 3339 UTC.
+    pub time: String,
+    /// The same instant in seconds since the Unix epoch.
+    pub timestamp: f64,
+    /// Which way it went.
+    pub direction: Direction,
+    /// Text, binary or a control frame.
+    pub kind: Kind,
+    /// Payload bytes of the whole message (all fragments).
+    pub size: u64,
+    /// Whether `data` holds less than `size` (the per-message limit).
+    pub truncated: bool,
+    /// How `data` is written.
+    pub encoding: Encoding,
+    /// The kept payload, unmasked.
+    pub data: String,
+    /// Close frames: the status code, when the payload has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_code: Option<u16>,
+    /// Close frames: the reason text after the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    /// The server negotiated an extension anyway: `data` is the raw (likely compressed)
+    /// payload in base64.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compressed: bool,
+}
+
+impl WsMessage {
+    /// The kept payload bytes, decoded from `data`.
+    #[must_use]
+    pub fn bytes(&self) -> Vec<u8> {
+        match self.encoding {
+            Encoding::Utf8 => self.data.as_bytes().to_vec(),
+            Encoding::Base64 => base64::engine::general_purpose::STANDARD
+                .decode(&self.data)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// One short console line for `--ws-log`.
+#[must_use]
+pub fn log_line(message: &WsMessage) -> String {
+    use std::fmt::Write as _;
+    let arrow = match message.direction {
+        Direction::ClientToServer => "->",
+        Direction::ServerToClient => "<-",
+    };
+    let kind = serde_json::to_value(message.kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let mut line = format!("ws #{} {arrow} {kind} {} B", message.flow_id, message.size);
+    if let Some(code) = message.close_code {
+        let _ = write!(line, " code {code}");
+    }
+    if message.truncated {
+        line.push_str(" (truncated)");
+    }
+    line
+}
+
+/// Why the parser stopped reading a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Violation {
+    /// RSV bits set although no extension was negotiated.
+    ReservedBits,
+    /// Opcode 3-7 or 11-15.
+    UnknownOpcode(u8),
+    /// A control frame without FIN.
+    FragmentedControl,
+    /// A control frame longer than 125 bytes.
+    ControlTooLong,
+    /// A 64-bit length with the most significant bit set.
+    LengthTopBit,
+    /// A client frame without a mask or a server frame with one.
+    MaskMismatch,
+    /// A continuation frame with no message in progress.
+    UnexpectedContinuation,
+    /// A new text or binary frame while a fragmented message is in progress.
+    InterleavedDataFrame,
+    /// More than [`MAX_FRAGMENTS`] frames in one message.
+    TooManyFragments,
+}
+
+/// Whether the server agreed to an extension, which allows RSV bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Extensions {
+    /// None negotiated: RSV bits are a protocol violation.
+    None,
+    /// The server answered with `Sec-WebSocket-Extensions`: RSV bits are allowed and
+    /// payloads are recorded raw.
+    Negotiated,
+}
+
+/// A parsed frame header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// Last frame of its message.
+    pub fin: bool,
+    /// RSV1-3 as the low three bits.
+    pub rsv: u8,
+    /// The opcode, 0 for continuation.
+    pub opcode: u8,
+    /// The masking key, when the mask bit is set.
+    pub mask: Option<[u8; 4]>,
+    /// Payload length.
+    pub len: u64,
+    /// Header bytes: 2 to 14.
+    pub header_len: usize,
+}
+
+/// Parses the frame header at the start of `buf`.
+///
+/// Returns `Ok(None)` when `buf` is too short to hold the whole header.
+///
+/// # Errors
+///
+/// A [`Violation`] for reserved bits, unknown opcodes, bad control frames, a length with
+/// its top bit set, or a mask bit that does not match `direction`.
+pub fn parse_header(
+    buf: &[u8],
+    direction: Direction,
+    extensions: Extensions,
+) -> Result<Option<FrameHeader>, Violation> {
+    let [b0, b1, rest @ ..] = buf else {
+        return Ok(None);
+    };
+    let fin = b0 & 0x80 != 0;
+    let rsv = (b0 >> 4) & 0x07;
+    let opcode = b0 & 0x0F;
+    if rsv != 0 && extensions == Extensions::None {
+        return Err(Violation::ReservedBits);
+    }
+    if opcode != 0 && Kind::from_opcode(opcode).is_none() {
+        return Err(Violation::UnknownOpcode(opcode));
+    }
+    let control = opcode >= 8;
+    let len7 = u64::from(b1 & 0x7F);
+    if control && !fin {
+        return Err(Violation::FragmentedControl);
+    }
+    if control && len7 > MAX_CONTROL {
+        return Err(Violation::ControlTooLong);
+    }
+    let masked = b1 & 0x80 != 0;
+    if masked != (direction == Direction::ClientToServer) {
+        return Err(Violation::MaskMismatch);
+    }
+    let ext = match len7 {
+        126 => 2,
+        127 => 8,
+        _ => 0,
+    };
+    let mask_len = if masked { 4 } else { 0 };
+    if rest.len() < ext + mask_len {
+        return Ok(None);
+    }
+    let len = match ext {
+        2 => u64::from(u16::from_be_bytes([rest[0], rest[1]])),
+        8 => {
+            let mut be = [0_u8; 8];
+            be.copy_from_slice(&rest[..8]);
+            let len = u64::from_be_bytes(be);
+            if len >> 63 != 0 {
+                return Err(Violation::LengthTopBit);
+            }
+            len
+        }
+        _ => len7,
+    };
+    let mask = masked.then(|| {
+        let mut key = [0_u8; 4];
+        key.copy_from_slice(&rest[ext..ext + 4]);
+        key
+    });
+    Ok(Some(FrameHeader {
+        fin,
+        rsv,
+        opcode,
+        mask,
+        len,
+        header_len: 2 + ext + mask_len,
+    }))
+}
+
+/// A complete message the parser produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parsed {
+    /// What it is.
+    pub kind: Kind,
+    /// The kept, unmasked payload (at most the body limit).
+    pub kept: Vec<u8>,
+    /// Payload bytes of the whole message.
+    pub size: u64,
+    /// RSV bits were allowed (an extension was negotiated): the payload is raw.
+    pub compressed: bool,
+}
+
+#[derive(Debug)]
+struct Frame {
+    header: FrameHeader,
+    remaining: u64,
+    /// Payload bytes of this frame seen so far, for the mask position.
+    offset: u64,
+}
+
+#[derive(Debug)]
+struct Partial {
+    kind: Kind,
+    kept: Vec<u8>,
+    size: u64,
+    fragments: usize,
+}
+
+/// Incremental frame parser for one direction of a connection. Bounded: it holds at most
+/// one partial header, one message's kept bytes and one control payload.
+#[derive(Debug)]
+pub struct FrameParser {
+    direction: Direction,
+    extensions: Extensions,
+    body_limit: usize,
+    header: [u8; MAX_HEADER],
+    have: usize,
+    frame: Option<Frame>,
+    message: Option<Partial>,
+    control: Option<Partial>,
+    failed: Option<Violation>,
+}
+
+impl FrameParser {
+    /// A parser for `direction` that keeps at most `body_limit` bytes per message.
+    #[must_use]
+    pub fn new(direction: Direction, extensions: Extensions, body_limit: usize) -> Self {
+        Self {
+            direction,
+            extensions,
+            body_limit,
+            header: [0; MAX_HEADER],
+            have: 0,
+            frame: None,
+            message: None,
+            control: None,
+            failed: None,
+        }
+    }
+
+    /// The violation that stopped parsing, if one did.
+    #[must_use]
+    pub fn failed(&self) -> Option<Violation> {
+        self.failed
+    }
+
+    /// Bytes held in buffers right now.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        self.have
+            + self.message.as_ref().map_or(0, |m| m.kept.capacity())
+            + self.control.as_ref().map_or(0, |m| m.kept.capacity())
+    }
+
+    /// Feeds the next bytes of the stream; complete messages go to `out`. After a
+    /// violation it ignores everything.
+    pub fn feed(&mut self, mut bytes: &[u8], out: &mut Vec<Parsed>) {
+        while self.failed.is_none() {
+            if self.frame.is_none() {
+                if bytes.is_empty() {
+                    return;
+                }
+                let take = (MAX_HEADER - self.have).min(bytes.len());
+                self.header[self.have..self.have + take].copy_from_slice(&bytes[..take]);
+                match parse_header(
+                    &self.header[..self.have + take],
+                    self.direction,
+                    self.extensions,
+                ) {
+                    Err(violation) => self.fail(violation),
+                    Ok(None) => {
+                        self.have += take;
+                        return;
+                    }
+                    Ok(Some(header)) => {
+                        bytes = &bytes[header.header_len - self.have..];
+                        self.have = 0;
+                        if let Err(violation) = self.start(header) {
+                            self.fail(violation);
+                        }
+                    }
+                }
+                continue;
+            }
+            self.payload(&mut bytes);
+            if self.frame.as_ref().is_some_and(|f| f.remaining == 0) {
+                self.end_frame(out);
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn fail(&mut self, violation: Violation) {
+        self.failed = Some(violation);
+        self.frame = None;
+        self.message = None;
+        self.control = None;
+    }
+
+    fn start(&mut self, header: FrameHeader) -> Result<(), Violation> {
+        match Kind::from_opcode(header.opcode) {
+            None => {
+                let message = self
+                    .message
+                    .as_mut()
+                    .ok_or(Violation::UnexpectedContinuation)?;
+                message.fragments += 1;
+                if message.fragments > MAX_FRAGMENTS {
+                    return Err(Violation::TooManyFragments);
+                }
+            }
+            Some(kind) if kind.is_control() => {
+                self.control = Some(Partial {
+                    kind,
+                    kept: Vec::new(),
+                    size: 0,
+                    fragments: 1,
+                });
+            }
+            Some(kind) => {
+                if self.message.is_some() {
+                    return Err(Violation::InterleavedDataFrame);
+                }
+                self.message = Some(Partial {
+                    kind,
+                    kept: Vec::new(),
+                    size: 0,
+                    fragments: 1,
+                });
+            }
+        }
+        self.frame = Some(Frame {
+            header,
+            remaining: header.len,
+            offset: 0,
+        });
+        Ok(())
+    }
+
+    fn payload(&mut self, bytes: &mut &[u8]) {
+        let Some(frame) = self.frame.as_mut() else {
+            return;
+        };
+        let n = usize::try_from(frame.remaining)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let (chunk, rest) = bytes.split_at(n);
+        *bytes = rest;
+        let control = frame.header.opcode >= 8;
+        let partial = if control {
+            self.control.as_mut()
+        } else {
+            self.message.as_mut()
+        };
+        if let Some(partial) = partial {
+            let limit = if control { usize::MAX } else { self.body_limit };
+            let room = limit.saturating_sub(partial.kept.len()).min(chunk.len());
+            let start = partial.kept.len();
+            partial.kept.extend_from_slice(&chunk[..room]);
+            if let Some(key) = frame.header.mask {
+                for (i, byte) in partial.kept[start..].iter_mut().enumerate() {
+                    let pos = frame.offset.wrapping_add(i as u64);
+                    *byte ^= key[usize::try_from(pos % 4).unwrap_or(0)];
+                }
+            }
+            partial.size = partial.size.saturating_add(n as u64);
+        }
+        frame.remaining -= n as u64;
+        frame.offset = frame.offset.wrapping_add(n as u64);
+    }
+
+    fn end_frame(&mut self, out: &mut Vec<Parsed>) {
+        let Some(frame) = self.frame.take() else {
+            return;
+        };
+        let compressed = self.extensions == Extensions::Negotiated;
+        let done = if frame.header.opcode >= 8 {
+            self.control.take()
+        } else if frame.header.fin {
+            self.message.take()
+        } else {
+            None
+        };
+        if let Some(partial) = done {
+            out.push(Parsed {
+                kind: partial.kind,
+                kept: partial.kept,
+                size: partial.size,
+                compressed: compressed && !partial.kind.is_control(),
+            });
+        }
+    }
+}
+
+/// The close code and reason in a close frame's payload.
+#[must_use]
+pub fn close_payload(payload: &[u8]) -> (Option<u16>, Option<String>) {
+    match payload {
+        [hi, lo, reason @ ..] => (
+            Some(u16::from_be_bytes([*hi, *lo])),
+            (!reason.is_empty()).then(|| String::from_utf8_lossy(reason).into_owned()),
+        ),
+        _ => (None, None),
+    }
+}
+
+/// Builds the record of `parsed`.
+#[must_use]
+pub fn message(flow_id: u64, seq: u64, direction: Direction, parsed: &Parsed) -> WsMessage {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let truncated = parsed.size > parsed.kept.len() as u64;
+    let (close_code, close_reason) = if parsed.kind == Kind::Close {
+        close_payload(&parsed.kept)
+    } else {
+        (None, None)
+    };
+    let text = (parsed.kind != Kind::Binary && !parsed.compressed)
+        .then(|| match std::str::from_utf8(&parsed.kept) {
+            Ok(text) => Some(text),
+            // A UTF-8 sequence cut by the limit is still text: keep the valid prefix.
+            Err(e) if e.error_len().is_none() && truncated => {
+                std::str::from_utf8(&parsed.kept[..e.valid_up_to()]).ok()
+            }
+            Err(_) => None,
+        })
+        .flatten();
+    let (encoding, data) = match text {
+        Some(text) => (Encoding::Utf8, text.to_owned()),
+        None => (
+            Encoding::Base64,
+            base64::engine::general_purpose::STANDARD.encode(&parsed.kept),
+        ),
+    };
+    WsMessage {
+        flow_id,
+        seq,
+        time: Utc::now().rfc3339(),
+        timestamp: since.as_secs_f64(),
+        direction,
+        kind: parsed.kind,
+        size: parsed.size,
+        truncated,
+        encoding,
+        data,
+        close_code,
+        close_reason,
+        compressed: parsed.compressed,
+    }
+}
+
+/// Whether `headers` ask for a WebSocket upgrade (`Upgrade: websocket`).
+#[must_use]
+pub fn is_websocket(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::UPGRADE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+}
+
+/// Removes `Sec-WebSocket-Extensions` from a client's upgrade request, so the server cannot
+/// negotiate `permessage-deflate` or any other extension this parser does not decode.
+/// Returns whether an offer was removed.
+pub fn strip_extensions(headers: &mut HeaderMap) -> bool {
+    let offered = headers
+        .get_all(header::SEC_WEBSOCKET_EXTENSIONS)
+        .iter()
+        .any(|v| !v.as_bytes().trim_ascii().is_empty());
+    headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
+    offered
+}
+
+/// Whether the server's `101` answer agreed to an extension.
+#[must_use]
+pub fn negotiated(headers: &HeaderMap) -> Extensions {
+    if headers.contains_key(header::SEC_WEBSOCKET_EXTENSIONS) {
+        Extensions::Negotiated
+    } else {
+        Extensions::None
+    }
+}
+
+/// Numbers and publishes the messages of one connection, both directions in one order.
+#[derive(Debug)]
+struct Recorder {
+    flow_id: u64,
+    bus: Bus,
+    next: Mutex<u64>,
+}
+
+impl Recorder {
+    fn record(&self, direction: Direction, parsed: &Parsed) {
+        // Numbering and publishing under one lock keeps the bus in `seq` order.
+        let mut next = self.next.lock().expect("ws recorder lock poisoned");
+        let message = message(self.flow_id, *next, direction, parsed);
+        *next += 1;
+        self.bus.publish(FlowEvent::WsMessage(Arc::new(message)));
+    }
+}
+
+/// Joins the upgraded `client` and `server` streams of WebSocket flow `flow_id`, forwarding
+/// bytes unchanged both ways and publishing each message as [`FlowEvent::WsMessage`].
+/// Returns when either side closes or fails.
+pub async fn pump<C, S>(
+    client: C,
+    server: S,
+    flow_id: u64,
+    bus: Bus,
+    limits: WsLimits,
+    extensions: Extensions,
+) where
+    C: AsyncRead + AsyncWrite,
+    S: AsyncRead + AsyncWrite,
+{
+    let recorder = Recorder {
+        flow_id,
+        bus,
+        next: Mutex::new(0),
+    };
+    let (client_read, client_write) = tokio::io::split(client);
+    let (server_read, server_write) = tokio::io::split(server);
+    let up = FrameParser::new(Direction::ClientToServer, extensions, limits.body_limit);
+    let down = FrameParser::new(Direction::ServerToClient, extensions, limits.body_limit);
+    let _ = tokio::try_join!(
+        one_way(client_read, server_write, up, &recorder),
+        one_way(server_read, client_write, down, &recorder),
+    );
+}
+
+async fn one_way<R, W>(
+    mut from: R,
+    mut to: W,
+    mut parser: FrameParser,
+    recorder: &Recorder,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0_u8; CHUNK];
+    let mut out = Vec::new();
+    loop {
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            return to.shutdown().await;
+        }
+        // Forward first: parsing never delays the traffic.
+        to.write_all(&buf[..n]).await?;
+        parser.feed(&buf[..n], &mut out);
+        for parsed in out.drain(..) {
+            recorder.record(parser.direction, &parsed);
+        }
+    }
+}
+
+/// The recorded messages of each WebSocket flow, at most [`WsLimits::max_messages`] per
+/// flow. [`crate::events::FlowStore`] owns one and drops a flow's messages with the flow.
+#[derive(Debug, Clone)]
+pub struct WsStore {
+    inner: Arc<Mutex<HashMap<u64, VecDeque<Arc<WsMessage>>>>>,
+    max_messages: usize,
+}
+
+impl WsStore {
+    /// An empty store keeping `max_messages` per flow (at least one).
+    #[must_use]
+    pub fn new(max_messages: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            max_messages: max_messages.max(1),
+        }
+    }
+
+    /// Adds `message`, dropping its flow's oldest message when full.
+    pub fn push(&self, message: Arc<WsMessage>) {
+        let mut flows = self.lock();
+        let ring = flows.entry(message.flow_id).or_default();
+        if ring.len() >= self.max_messages {
+            ring.pop_front();
+        }
+        ring.push_back(message);
+    }
+
+    /// Up to `limit` messages of `flow_id` with `seq` above `after`, oldest first.
+    #[must_use]
+    pub fn list(&self, flow_id: u64, after: Option<u64>, limit: usize) -> Vec<Arc<WsMessage>> {
+        self.lock().get(&flow_id).map_or_else(Vec::new, |ring| {
+            ring.iter()
+                .filter(|m| after.is_none_or(|after| m.seq > after))
+                .take(limit)
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Messages held for `flow_id`.
+    #[must_use]
+    pub fn len(&self, flow_id: u64) -> usize {
+        self.lock().get(&flow_id).map_or(0, VecDeque::len)
+    }
+
+    /// Whether no message is held for any flow.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    /// Forgets the messages of `flow_id`.
+    pub fn remove(&self, flow_id: u64) {
+        self.lock().remove(&flow_id);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, VecDeque<Arc<WsMessage>>>> {
+        self.inner.lock().expect("ws store lock poisoned")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const C2S: Direction = Direction::ClientToServer;
+    const S2C: Direction = Direction::ServerToClient;
+
+    /// Builds one frame; `mask` masks the payload.
+    fn frame(fin: bool, opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+        let mut out = vec![if fin { 0x80 } else { 0 } | opcode];
+        let bit = if mask.is_some() { 0x80 } else { 0 };
+        match payload.len() {
+            n if n < 126 => out.push(bit | u8::try_from(n).expect("short")),
+            n if n <= 0xFFFF => {
+                out.push(bit | 0x7E);
+                out.extend_from_slice(&u16::try_from(n).expect("16-bit").to_be_bytes());
+            }
+            n => {
+                out.push(bit | 0x7F);
+                out.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        match mask {
+            Some(key) => {
+                out.extend_from_slice(&key);
+                out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+            }
+            None => out.extend_from_slice(payload),
+        }
+        out
+    }
+
+    fn parse_all(direction: Direction, bytes: &[u8], limit: usize) -> (Vec<Parsed>, FrameParser) {
+        let mut parser = FrameParser::new(direction, Extensions::None, limit);
+        let mut out = Vec::new();
+        // One byte at a time exercises every split point.
+        for byte in bytes {
+            parser.feed(std::slice::from_ref(byte), &mut out);
+        }
+        (out, parser)
+    }
+
+    #[test]
+    fn header_table() {
+        type Case<'a> = (
+            &'a [u8],
+            Direction,
+            Result<Option<(u8, u64, usize)>, Violation>,
+        );
+        let key = [1, 2, 3, 4];
+        let cases: &[Case<'_>] = &[
+            (&[0x81, 0x05], S2C, Ok(Some((1, 5, 2)))),
+            (&[0x82, 0x7E, 0x01, 0x00], S2C, Ok(Some((2, 256, 4)))),
+            (
+                &[0x82, 0x7F, 0, 0, 0, 0, 0, 1, 0, 0],
+                S2C,
+                Ok(Some((2, 65_536, 10))),
+            ),
+            (&[0x81, 0x85, 1, 2, 3, 4], C2S, Ok(Some((1, 5, 6)))),
+            (&[0x81], S2C, Ok(None)),
+            (&[0x82, 0x7E, 0x01], S2C, Ok(None)),
+            (&[0x81, 0x85, 1, 2], C2S, Ok(None)),
+            (&[0xC1, 0x00], S2C, Err(Violation::ReservedBits)),
+            (&[0x91, 0x00], S2C, Err(Violation::ReservedBits)),
+            (&[0x83, 0x00], S2C, Err(Violation::UnknownOpcode(3))),
+            (&[0x8F, 0x00], S2C, Err(Violation::UnknownOpcode(15))),
+            (&[0x09, 0x00], S2C, Err(Violation::FragmentedControl)),
+            (&[0x89, 0x7E, 0, 200], S2C, Err(Violation::ControlTooLong)),
+            (
+                &[0x82, 0x7F, 0x80, 0, 0, 0, 0, 0, 0, 0],
+                S2C,
+                Err(Violation::LengthTopBit),
+            ),
+            (
+                &[0x82, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                S2C,
+                Err(Violation::LengthTopBit),
+            ),
+            (&[0x81, 0x05], C2S, Err(Violation::MaskMismatch)),
+            (&[0x81, 0x85, 1, 2, 3, 4], S2C, Err(Violation::MaskMismatch)),
+        ];
+        for (bytes, direction, want) in cases {
+            let got = parse_header(bytes, *direction, Extensions::None)
+                .map(|h| h.map(|h| (h.opcode, h.len, h.header_len)));
+            assert_eq!(&got, want, "header {bytes:02x?}");
+        }
+        let h = parse_header(&[0x81, 0x85, 1, 2, 3, 4], C2S, Extensions::None);
+        assert_eq!(h.ok().flatten().and_then(|h| h.mask), Some(key));
+        let rsv1 = parse_header(&[0xC1, 0x00], S2C, Extensions::Negotiated);
+        assert!(rsv1.is_ok_and(|h| h.is_some_and(|h| h.rsv == 4)));
+    }
+
+    #[test]
+    fn unmasks_reassembles_and_reads_control_frames() {
+        let key = [0x37, 0xfa, 0x21, 0x3d];
+        let mut wire = frame(false, 1, b"Hel", Some(key));
+        wire.extend(frame(true, 9, b"p", Some(key)));
+        wire.extend(frame(false, 0, b"lo ", Some(key)));
+        wire.extend(frame(true, 0, b"world", Some(key)));
+        wire.extend(frame(true, 8, b"\x03\xe8bye", Some(key)));
+        let (out, parser) = parse_all(C2S, &wire, 1024);
+        assert_eq!(parser.failed(), None);
+        let kinds: Vec<Kind> = out.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [Kind::Ping, Kind::Text, Kind::Close]);
+        assert_eq!(out[1].kept, b"Hello world");
+        assert_eq!(
+            close_payload(&out[2].kept),
+            (Some(1000), Some("bye".into()))
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_limit_and_counts_the_rest() {
+        let payload = vec![b'a'; 70_000];
+        let (out, _) = parse_all(S2C, &frame(true, 2, &payload, None), 1000);
+        assert_eq!((out[0].kept.len(), out[0].size), (1000, 70_000));
+        let record = message(1, 0, S2C, &out[0]);
+        assert!(record.truncated);
+    }
+
+    #[test]
+    fn violations_stop_parsing() {
+        let mut wire = frame(true, 1, b"ok", None);
+        wire.extend(frame(true, 0, b"orphan", None));
+        wire.extend(frame(true, 1, b"after", None));
+        let (out, parser) = parse_all(S2C, &wire, 1024);
+        assert_eq!(out.len(), 1);
+        assert_eq!(parser.failed(), Some(Violation::UnexpectedContinuation));
+
+        let mut wire = frame(false, 1, b"a", None);
+        wire.extend(frame(true, 2, b"b", None));
+        let (_, parser) = parse_all(S2C, &wire, 1024);
+        assert_eq!(parser.failed(), Some(Violation::InterleavedDataFrame));
+    }
+
+    #[test]
+    fn too_many_fragments_stop_parsing() {
+        let mut parser = FrameParser::new(S2C, Extensions::None, 16);
+        let mut out = Vec::new();
+        parser.feed(&frame(false, 1, b"", None), &mut out);
+        let empty = frame(false, 0, b"", None);
+        for _ in 0..MAX_FRAGMENTS {
+            parser.feed(&empty, &mut out);
+        }
+        assert_eq!(parser.failed(), Some(Violation::TooManyFragments));
+        assert_eq!(out, Vec::<Parsed>::new());
+    }
+
+    #[test]
+    fn random_bytes_never_panic_and_stay_bounded() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..2000 {
+            let direction = if round % 2 == 0 { C2S } else { S2C };
+            let extensions = if round % 3 == 0 {
+                Extensions::Negotiated
+            } else {
+                Extensions::None
+            };
+            let mut parser = FrameParser::new(direction, extensions, 256);
+            let mut out = Vec::new();
+            let len = usize::try_from(next() % 4096).unwrap_or(0);
+            let bytes: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
+            for chunk in bytes.chunks(usize::try_from(next() % 64 + 1).unwrap_or(1)) {
+                parser.feed(chunk, &mut out);
+                assert!(parser.buffered() <= 256 + 128 + MAX_HEADER, "round {round}");
+            }
+            for parsed in out {
+                assert!(parsed.kept.len() <= 256, "round {round}");
+                let _ = message(1, 0, direction, &parsed);
+            }
+        }
+    }
+
+    #[test]
+    fn strips_extension_offers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::UPGRADE, "WebSocket".parse().expect("value"));
+        assert!(is_websocket(&headers));
+        assert!(!strip_extensions(&mut headers));
+        headers.insert(
+            header::SEC_WEBSOCKET_EXTENSIONS,
+            "permessage-deflate; client_max_window_bits"
+                .parse()
+                .expect("value"),
+        );
+        assert!(strip_extensions(&mut headers));
+        assert!(!headers.contains_key(header::SEC_WEBSOCKET_EXTENSIONS));
+    }
+
+    #[test]
+    fn the_store_keeps_the_newest_messages() {
+        let store = WsStore::new(3);
+        for seq in 0..5 {
+            let parsed = Parsed {
+                kind: Kind::Text,
+                kept: b"x".to_vec(),
+                size: 1,
+                compressed: false,
+            };
+            store.push(Arc::new(message(7, seq, S2C, &parsed)));
+        }
+        let seqs: Vec<u64> = store.list(7, None, 10).iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, [2, 3, 4]);
+        let after: Vec<u64> = store.list(7, Some(2), 1).iter().map(|m| m.seq).collect();
+        assert_eq!(after, [3]);
+        store.remove(7);
+        assert!(store.is_empty());
+    }
+}

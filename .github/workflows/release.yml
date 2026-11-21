@@ -1,0 +1,380 @@
+name: Release
+
+# Builds wirust for five targets, tests every build and, for a version tag, publishes a GitHub
+# Release with the binaries, their archives, install.sh and a SHA256SUMS file. Maintainer
+# guide: docs/releasing.md.
+#
+#   - Push a tag `vX.Y.Z` that equals the version of the `wirust` package: builds, tests,
+#     smoke-tests, checksums, attests and publishes.
+#   - Run by hand (Actions tab or `gh workflow run release.yml -f publish=false`): the same
+#     builds and tests, and the result is kept as workflow artifacts for a week. With
+#     `publish` set to true on a tag it publishes as well.
+#
+# The `fingerprint` crate is a git dependency on the public repository
+# https://github.com/dec0iiyy/mirrust, pinned by Cargo.lock to one commit; cargo fetches it
+# over HTTPS without credentials, like the crates.io dependencies.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release (only when run on a v* tag); false keeps the files as workflow artifacts"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Runs for one ref queue up instead of cancelling each other: a release must not be cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  meta:
+    name: version check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Decides the name the files carry and whether this run publishes. A run that publishes
+      # needs a tag equal to "v" + the version of the `wirust` package. A manual run that does
+      # not publish skips that check and names its files after the commit, because a branch
+      # name may contain a slash.
+      - name: Check the tag against Cargo.toml
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          publish=false
+          if [ "$EVENT" = push ] || [ "$PUBLISH_INPUT" = true ]; then
+            publish=true
+          fi
+          if [ "$publish" = false ]; then
+            echo "tag=dev-${SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Manual run without publishing: the version check is skipped."
+            exit 0
+          fi
+          if [ "$REF_TYPE" != tag ]; then
+            echo "::error::Publishing needs a v* tag; this run is on the $REF_TYPE '$REF_NAME'. Pick the tag in 'Use workflow from'."
+            exit 1
+          fi
+          version=$(cargo metadata --no-deps --locked --format-version 1 \
+            | jq -r '.packages[] | select(.name == "wirust") | .version')
+          if [ -z "$version" ]; then
+            echo "::error::The package 'wirust' has no version in cargo metadata."
+            exit 1
+          fi
+          if [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::The tag is '$REF_NAME', but the version of the 'wirust' package in crates/proxy/Cargo.toml is $version (expected the tag v$version). Fix the version or the tag."
+            exit 1
+          fi
+          echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Tag $REF_NAME matches version $version."
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    # The run steps are bash everywhere, which on the Windows runner is Git for Windows' bash.
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static binaries: musl libc is linked in, so they run on any Linux distribution
+          # whatever its glibc.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            asset: wirust-linux-x86_64
+            linux: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            asset: wirust-linux-aarch64
+            linux: true
+          # macos-latest is an Apple silicon runner; the x86_64 binary is cross-compiled and
+          # its tests run under Rosetta 2.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: wirust-macos-arm64
+            linux: false
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            asset: wirust-macos-x86_64
+            linux: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: wirust-windows-x86_64.exe
+            linux: false
+            windows: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No build cache on purpose: a release is built from scratch, so that no artifact of an
+      # earlier run, from any branch, can end up in it.
+      - name: Install Rust (stable) and the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET" --no-self-update
+          rustup default stable
+          rustc --version --verbose
+      # aws-lc-sys (through rustls) compiles C and assembly. For the musl targets it needs
+      # musl's headers, which musl-tools brings with the `musl-gcc` wrapper. The crate has
+      # pregenerated bindings for both musl targets, so neither CMake nor bindgen is installed.
+      # cc-rs would look for `x86_64-linux-musl-gcc` or `aarch64-linux-musl-gcc` (a cross
+      # compiler); CC_<target> points it at the wrapper instead.
+      - name: Install musl-tools and select the C compiler
+        if: matrix.linux
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          musl-gcc -dumpmachine
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+      # aws-lc-sys wants NASM on Windows x86-64. The variable makes it use the object files
+      # that the crate ships prebuilt, so NASM is not installed.
+      - name: Use the prebuilt NASM objects of aws-lc-sys
+        if: matrix.windows
+        run: echo "AWS_LC_SYS_PREBUILT_NASM=1" >> "$GITHUB_ENV"
+      # Every download happens here, before the build: the crates of Cargo.lock and the
+      # `fingerprint` git dependency at the commit Cargo.lock pins. A network failure shows up
+      # in this step and not in the middle of a build.
+      - name: Fetch the dependencies
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo fetch --locked --target "$TARGET"
+      # Panic messages and debug assertions embed the path of the source file. Without the
+      # remapping, the home directory of the runner ends up in the binary
+      # (/home/runner/.cargo/registry/src/...). CARGO_HOME is where cargo unpacks the crates
+      # and the git checkout; USERPROFILE is the native form of the home directory in Git for
+      # Windows' bash.
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          export RUSTFLAGS="--remap-path-prefix=$cargo_home=/cargo"
+          cargo build --release --locked --offline --bin wirust --target "$TARGET"
+      # The whole test suite, built for the release target with the release profile. The
+      # tests are offline: in-process servers and clients on random loopback ports.
+      - name: Test
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          export RUSTFLAGS="--remap-path-prefix=$cargo_home=/cargo"
+          cargo test --release --locked --offline --workspace --target "$TARGET"
+      # A binary that is not static would fail on a distribution without the right glibc.
+      - name: Check that the binary is static
+        if: matrix.linux
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/wirust"
+          readelf -h -l "$bin" | grep -E 'Machine:|Type:|INTERP' || true
+          if readelf -l "$bin" | grep -q INTERP; then
+            echo "::error::$bin asks for a dynamic loader, so it is not static."
+            exit 1
+          fi
+          if readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::$bin needs shared libraries, so it is not static."
+            exit 1
+          fi
+          echo "$bin is static."
+      # Linux and macOS: the release binary on the runner, against a local origin.
+      - name: Smoke test
+        if: ${{ !matrix.windows }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: .github/scripts/smoke-test.sh "target/$TARGET/release/wirust"
+      # Windows: the binary starts and creates its CA; the proxy itself is covered by the
+      # tests above, built for the same target.
+      - name: Smoke test (Windows)
+        if: matrix.windows
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/wirust.exe"
+          "$bin" --help | grep -q wirust
+          ca=$("$bin" ca path --config-dir "$RUNNER_TEMP/wirust-ca" | tr -d '\r')
+          test -s "$ca"
+          "$bin" ca show --config-dir "$RUNNER_TEMP/wirust-ca" | grep -q 'BEGIN CERTIFICATE'
+          echo "smoke test passed: $bin"
+      # wirust-<tag>-<target>.tar.gz holds the binary, the licence files (LICENSE, NOTICE and
+      # THIRD-PARTY-LICENSES.md, the texts of the crates linked in) and the README; the bare
+      # binary is copied next to it under its short name. Written for GNU tar (Linux) and
+      # bsdtar (macOS): both take the same flags below except the owner.
+      - name: Package
+        if: ${{ !matrix.windows }}
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          export COPYFILE_DISABLE=1
+          name="wirust-$TAG-$TARGET"
+          bin="target/$TARGET/release/wirust"
+          mkdir -p "dist/$name"
+          cp "$bin" LICENSE NOTICE THIRD-PARTY-LICENSES.md README.md "dist/$name/"
+          chmod 755 "dist/$name/wirust"
+          if [ "$RUNNER_OS" = Linux ]; then
+            owner=(--owner=0 --group=0 --numeric-owner)
+          else
+            owner=(--uid 0 --gid 0 --numeric-owner)
+          fi
+          tar -czf "dist/$name.tar.gz" "${owner[@]}" -C dist "$name"
+          rm -r "dist/$name"
+          cp "$bin" "dist/$ASSET"
+          chmod 755 "dist/$ASSET"
+          tar -tzvf "dist/$name.tar.gz"
+          ls -l dist
+      # Windows: wirust-<tag>-<target>.zip with wirust.exe, LICENSE, NOTICE,
+      # THIRD-PARTY-LICENSES.md and README.md, and the bare wirust-windows-x86_64.exe. 7-Zip is
+      # on the runner image.
+      - name: Package (Windows)
+        if: matrix.windows
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          name="wirust-$TAG-$TARGET"
+          bin="target/$TARGET/release/wirust.exe"
+          mkdir -p "dist/$name"
+          cp "$bin" LICENSE NOTICE THIRD-PARTY-LICENSES.md README.md "dist/$name/"
+          (cd dist && 7z a -tzip "$name.zip" "$name")
+          rm -r "dist/$name"
+          cp "$bin" "dist/$ASSET"
+          7z l "dist/$name.zip"
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      # One line for every file that is uploaded, written in the format of sha256sum -c.
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # Five targets, two files each; fewer means a build job lost its files.
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 10
+          # The installer comes from the tagged commit, so it is listed in SHA256SUMS and
+          # attested like the binaries.
+          install -m 755 ../install.sh install.sh
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 11
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [meta, checksums]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that can write: to the release, and to the attestation store.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+      # Signed provenance for every file in SHA256SUMS. Check it with
+      # `gh attestation verify FILE --repo dec0iiyy/wirust`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A tag with a hyphen (v0.2.0-rc.1) is a pre-release.
+          prerelease=false
+          case "$TAG" in *-*) prerelease=true ;; esac
+          cat > notes.md <<EOF
+          ## Install
+
+          \`\`\`sh
+          curl -fsSL https://github.com/$GH_REPO/releases/download/$TAG/install.sh | sh
+          \`\`\`
+
+          Or download the binary for your system below (\`chmod +x\` after the download). Windows: \`wirust-windows-x86_64.exe\`.
+
+          ## Verify the download
+
+          Every file is listed in \`SHA256SUMS\`. Download it next to the file you want and check, for example:
+
+          \`\`\`console
+          $ grep ' wirust-linux-x86_64\$' SHA256SUMS | sha256sum -c -        # macOS: shasum -a 256 -c -
+          wirust-linux-x86_64: OK
+          \`\`\`
+
+          The files also carry signed build provenance, which proves that this repository's release workflow built them:
+
+          \`\`\`console
+          $ gh attestation verify wirust-linux-x86_64 --repo $GH_REPO --signer-workflow $GH_REPO/.github/workflows/release.yml
+          \`\`\`
+
+          The \`.tar.gz\` archives hold the binary, \`LICENSE\`, \`NOTICE\`, \`THIRD-PARTY-LICENSES.md\` and \`README.md\`; the Windows \`.zip\` holds \`wirust.exe\` and the same files.
+          EOF
+          gh release create "$TAG" --verify-tag --generate-notes --notes-file notes.md \
+            --prerelease="$prerelease" dist/*
