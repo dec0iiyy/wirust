@@ -277,6 +277,12 @@ impl Filter {
     /// Whether `flow` passes every set condition.
     #[must_use]
     pub fn matches(&self, flow: &StoredFlow) -> bool {
+        self.matches_with_ws(flow, None)
+    }
+
+    /// [`matches`](Self::matches), with `ws` holding the messages a `ws:` query searches.
+    #[must_use]
+    pub fn matches_with_ws(&self, flow: &StoredFlow, ws: Option<&WsStore>) -> bool {
         let (host, method, status) = flow.facets();
         self.host.as_ref().is_none_or(|want| {
             host.to_ascii_lowercase()
@@ -286,7 +292,10 @@ impl Filter {
             .as_ref()
             .is_none_or(|want| method.eq_ignore_ascii_case(want))
             && self.status.is_none_or(|want| status == Some(want))
-            && self.query.as_ref().is_none_or(|query| query.matches(flow))
+            && self
+                .query
+                .as_ref()
+                .is_none_or(|query| query.matches_with_ws(flow, ws))
     }
 }
 
@@ -401,7 +410,7 @@ impl FlowStore {
             .flows
             .iter()
             .rev()
-            .filter(|f| ids.contains(&f.id()) && filter.matches(f))
+            .filter(|f| ids.contains(&f.id()) && filter.matches_with_ws(f, Some(&self.ws)))
             .take(filter.limit.unwrap_or(usize::MAX))
             .cloned()
             .collect();

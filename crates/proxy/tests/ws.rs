@@ -234,17 +234,17 @@ async fn plain_ws_forwards_unchanged_and_records_every_kind_in_order() -> TestRe
         "the server gets the masked bytes unchanged"
     );
     assert!(
-        !seen
-            .head
+        seen.head
             .to_ascii_lowercase()
-            .contains("sec-websocket-extensions"),
-        "the extension offer is stripped: {}",
+            .contains("sec-websocket-extensions: permessage-deflate"),
+        "the extension offer reaches the server: {}",
         seen.head
     );
 
     let (record, messages) = recorded(&mut h.running.events, 8).await?;
     assert_eq!(record.status, Some(101));
-    assert!(record.flags.contains(&Flag::WsExtensionsStripped));
+    assert!(!record.flags.contains(&Flag::WsExtensionsStripped));
+    assert!(!record.flags.contains(&Flag::WsCompressed));
     assert_eq!(record.ws_messages, Some(0), "counted later, in the store");
     let seqs: Vec<u64> = messages.iter().map(|m| m.seq).collect();
     assert_eq!(seqs, (0..8).collect::<Vec<u64>>());
@@ -430,14 +430,146 @@ async fn garbage_after_the_upgrade_is_forwarded_and_not_parsed() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_server_that_negotiates_anyway_gets_raw_records() -> TestResult {
+async fn strip_compression_removes_the_offer() -> TestResult {
+    let mut h = harness(WsLimits {
+        strip_compression: true,
+        ..WsLimits::default()
+    })
+    .await?;
+    let to_client = frame(true, 1, b"plain", None);
+    let (port, seen) = ws_server(None, "", to_client.clone()).await?;
+    let host = format!("127.0.0.1:{port}");
+    let tcp = TcpStream::connect(h.running.addr).await?;
+    let request = upgrade_request(&format!("http://{host}/s"), &host);
+    client(tcp, &request, &[], to_client.len()).await?;
+    let seen = tokio::time::timeout(Duration::from_secs(10), seen).await??;
+    assert!(
+        !seen
+            .head
+            .to_ascii_lowercase()
+            .contains("sec-websocket-extensions"),
+        "the extension offer is stripped: {}",
+        seen.head
+    );
+    let (record, _) = recorded(&mut h.running.events, 1).await?;
+    assert!(record.flags.contains(&Flag::WsExtensionsStripped));
+    Ok(())
+}
+
+/// Compresses `messages` as one `permessage-deflate` sender does (RFC 7692 section 7.2.1):
+/// a sync flush per message with the `00 00 ff ff` tail removed; `takeover` keeps the
+/// window between messages.
+fn deflate(messages: &[&[u8]], takeover: bool) -> Vec<Vec<u8>> {
+    let mut state = flate2::Compress::new(flate2::Compression::default(), false);
+    messages
+        .iter()
+        .map(|message| {
+            if !takeover {
+                state.reset();
+            }
+            let mut out = Vec::with_capacity(message.len() + 1024);
+            state
+                .compress_vec(message, &mut out, flate2::FlushCompress::Sync)
+                .expect("compress");
+            assert!(out.ends_with(&[0, 0, 0xff, 0xff]), "sync flush tail");
+            out.truncate(out.len() - 4);
+            out
+        })
+        .collect()
+}
+
+/// A compressed message as frames: RSV1 on the first frame only, split in `parts`.
+fn compressed(opcode: u8, payload: &[u8], parts: usize, mask: Option<[u8; 4]>) -> Vec<u8> {
+    let size = payload.len().div_ceil(parts).max(1);
+    let chunks: Vec<&[u8]> = payload.chunks(size).collect();
+    let mut wire = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut f = frame(
+            i + 1 == chunks.len(),
+            if i == 0 { opcode } else { 0 },
+            chunk,
+            mask,
+        );
+        if i == 0 {
+            f[0] |= 0x40;
+        }
+        wire.extend(f);
+    }
+    wire
+}
+
+async fn deflate_round_trip(answer: &'static str, takeover: bool) -> TestResult {
     let mut h = harness(WsLimits::default()).await?;
-    // RSV1 set: a compressed frame under permessage-deflate.
+    let down: [&[u8]; 2] = [b"{\"tick\":1,\"tick\":1}", b"{\"tick\":2,\"tick\":2}"];
+    let up: [&[u8]; 2] = [b"subscribe subscribe", b"subscribe again"];
+    let to_client: Vec<u8> = deflate(&down, takeover)
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| compressed(1, p, i + 1, None))
+        .collect();
+    let to_server: Vec<u8> = deflate(&up, takeover)
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| compressed(1, p, 2 - i, Some(KEY)))
+        .collect();
+    let (port, seen) = ws_server(None, answer, to_client.clone()).await?;
+    let host = format!("127.0.0.1:{port}");
+    let tcp = TcpStream::connect(h.running.addr).await?;
+    let request = upgrade_request(&format!("http://{host}/d"), &host);
+    let got = client(tcp, &request, &to_server, to_client.len()).await?;
+    assert_eq!(
+        got, to_client,
+        "compressed bytes reach the client unchanged"
+    );
+    let seen = tokio::time::timeout(Duration::from_secs(10), seen).await??;
+    assert_eq!(seen.bytes, to_server, "and the server");
+    assert!(
+        seen.head.contains("permessage-deflate"),
+        "the offer is forwarded: {}",
+        seen.head
+    );
+    let (record, messages) = recorded(&mut h.running.events, 4).await?;
+    assert!(record.flags.contains(&Flag::WsCompressed));
+    assert!(!record.flags.contains(&Flag::WsExtensionsStripped));
+    for (direction, want) in [
+        (Direction::ServerToClient, down),
+        (Direction::ClientToServer, up),
+    ] {
+        let got = of(&messages, direction);
+        let texts: Vec<&[u8]> = got.iter().map(|m| m.data.as_bytes()).collect();
+        assert_eq!(texts, want, "{direction:?} takeover {takeover}");
+        for m in got {
+            assert!(m.compressed && !m.decode_failed, "{m:?}");
+            assert_eq!(m.encoding, Encoding::Utf8);
+            assert!(m.wire_size.is_some());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn permessage_deflate_with_context_takeover_is_inflated() -> TestResult {
+    deflate_round_trip("Sec-WebSocket-Extensions: permessage-deflate\r\n", true).await
+}
+
+#[tokio::test]
+async fn permessage_deflate_without_context_takeover_is_inflated() -> TestResult {
+    deflate_round_trip(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; \
+         client_no_context_takeover\r\n",
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn an_unknown_extension_gets_raw_records() -> TestResult {
+    let mut h = harness(WsLimits::default()).await?;
     let mut to_client = frame(true, 1, &[0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00], None);
     to_client[0] |= 0x40;
     let (port, _seen) = ws_server(
         None,
-        "Sec-WebSocket-Extensions: permessage-deflate\r\n",
+        "Sec-WebSocket-Extensions: x-custom-compression\r\n",
         to_client.clone(),
     )
     .await?;
@@ -448,7 +580,7 @@ async fn a_server_that_negotiates_anyway_gets_raw_records() -> TestResult {
     assert_eq!(got, to_client);
     let (record, messages) = recorded(&mut h.running.events, 1).await?;
     assert!(record.flags.contains(&Flag::WsCompressed));
-    assert!(messages[0].compressed);
+    assert!(messages[0].compressed && messages[0].decode_failed);
     assert_eq!(messages[0].encoding, Encoding::Base64);
     assert_eq!(messages[0].bytes(), to_client[2..]);
     Ok(())

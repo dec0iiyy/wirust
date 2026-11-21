@@ -114,11 +114,11 @@ pub enum Flag {
     MapRemote,
     /// The control plane sent this request (replay or compose), not a client.
     Replay,
-    /// The proxy removed the client's `Sec-WebSocket-Extensions` offer so the server could
-    /// not negotiate compression.
+    /// `--ws-strip-compression`: the proxy removed the client's `Sec-WebSocket-Extensions`
+    /// offer so the server could not negotiate compression.
     WsExtensionsStripped,
-    /// The server answered the WebSocket upgrade with an extension anyway: messages are
-    /// recorded as raw (likely compressed) payloads.
+    /// The server answered the WebSocket upgrade with an extension: `permessage-deflate`
+    /// messages are inflated for the record, other extensions are recorded raw.
     WsCompressed,
     /// The server connection went through the upstream proxy (`--upstream-proxy`).
     UpstreamProxy,

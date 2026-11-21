@@ -8,8 +8,7 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
    or MASQUE (`CONNECT-UDP`). The same mode would catch apps that ignore the system proxy.
 3. Testing on real phones and on iOS: `docs/mobile.md` was tried only on the Android emulator.
 4. Passthrough patterns in the web UI (replay and compose are there).
-5. WebSocket: `permessage-deflate` decoding instead of stripping, a `ws:` search field,
-   messages in session files, sending and editing messages.
+5. WebSocket: editing or dropping messages in flight (breakpoints on messages).
 6. gRPC with `.proto` files or server reflection (field names), and inflating compressed
    messages (the body decoder in `decode.rs` could be reused); today messages are decoded
    schema-less and compressed ones only listed.

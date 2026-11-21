@@ -88,6 +88,7 @@ document.addEventListener("DOMContentLoaded", () => {
     ["client:curl", "the known TLS client or the User-Agent contains it"],
     ["tls:failed, tls:yes, tls:none, tls:1.3", "failed handshake, intercepted TLS, plain HTTP, version"],
     ["flag:pause_timed_out", "the flow carries this flag (rule:NAME, responded, aborted, ...)"],
+    ["ws:subscribe", "a WebSocket message contains the text; ws: alone: the flow has messages"],
     ["word, \"two words\"", "the URL contains it"],
   ];
   const EXAMPLES = [

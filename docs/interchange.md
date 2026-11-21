@@ -26,6 +26,12 @@ can span several runs. Each line is flushed when written; after a crash the last
 cut, and readers skip it with a warning. A record with a newer `schema_version` is read with a
 warning and its unknown fields are ignored. Any other broken line is an error naming the line.
 
+WebSocket messages are lines of their own, written after their flow's record as they
+arrive: `{"schema_version": 1, "type": "ws_message", "flow_id": 12, "seq": 0, ...}` with the
+fields of a message in `docs/websocket.md`. This is an additive record type, so
+`schema_version` stays 1 and files without such lines load as before; `view`, `export` and
+`--filter` read them. wirust 0.2 and older stop at the first message line.
+
 ## Body records
 
 `request_body` and `response_body` are `{ "size", "truncated", "encoding": "utf8" | "base64",
@@ -89,6 +95,7 @@ have no HAR form. The mapping:
 | `_tls` | client-leg TLS: `version`, `sni`, `alpn`, `ja4`, `ja3`, `client` (known client name) |
 | `_flags` | interceptor flags, such as `pause_timed_out` |
 | `_error` | why the exchange failed |
+| `_webSocketMessages` | the messages of a WebSocket upgrade, Chrome's format: `type` (`send`/`receive`), `time` (seconds since the epoch), `opcode`, `data` (text, or base64 for other payloads); from memory with `--ui`, from the session's message lines with `export` |
 
 Import is best effort: unknown fields are ignored, missing ones get neutral values, `_tls`,
 `_flags` and `_error` are read back, and every flow gets the flag `imported`. HAR text is the
@@ -127,6 +134,7 @@ Quote values with spaces: `body:"free text"` (`\"` and `\\` escape inside quotes
 | `client:curl` | the known TLS client or the `User-Agent` contains it |
 | `tls:failed`, `tls:yes`, `tls:none`, `tls:1.3` | failed handshake, intercepted TLS, plain HTTP, negotiated version |
 | `flag:pause_timed_out` | the flow carries this flag (`responded`, `aborted`, `imported`, ...) |
+| `ws:subscribe`, `ws:` | a WebSocket message of the flow contains the text (kept payload, decompressed for `permessage-deflate`; base64 payloads decoded); `ws:` alone: the flow has messages |
 | `word`, `"two words"` | the URL contains it (tunnels and failed handshakes: target or SNI) |
 
 Examples:

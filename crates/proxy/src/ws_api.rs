@@ -1,16 +1,17 @@
-//! Control-plane route for WebSocket messages: `GET /api/v1/flows/{id}/messages`.
-//! `control::route` calls [`route`] after its Host, Origin and token checks.
+//! Control-plane route for WebSocket messages: `GET /api/v1/flows/{id}/messages` lists
+//! them, `POST` sends one into the live connection. `control::route` calls [`route`] after
+//! its Host, Origin and token checks.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
 use http::{Method, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::events::{FlowStore, StoredFlow};
 use crate::flow::Event;
-use crate::ws::{MAX_PAGE, WsMessage};
+use crate::ws::{Direction, InjectError, Injection, Kind, MAX_PAGE, WsMessage};
 
 /// Messages one page holds when `limit` is not given.
 const DEFAULT_PAGE: usize = 200;
@@ -26,17 +27,34 @@ struct Page {
     messages: Vec<Arc<WsMessage>>,
 }
 
-/// Answers `GET /api/v1/flows/{id}/messages?after=SEQ&limit=N`; `None` leaves the request
-/// to `control::route`.
+/// The body of `POST /api/v1/flows/{id}/messages`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Send {
+    /// `client_to_server` sends to the server, `server_to_client` to the client.
+    direction: Direction,
+    /// `text` or `binary`.
+    #[serde(rename = "type")]
+    kind: Kind,
+    /// The text, or for binary the bytes in hex (spaces allowed).
+    data: String,
+}
+
+/// Answers `GET /api/v1/flows/{id}/messages?after=SEQ&limit=N` and `POST` of the same path
+/// (`body` is the request body); `None` leaves the request to `control::route`.
 pub(crate) fn route(
     store: &FlowStore,
     method: &Method,
     segments: &[&str],
     query: &str,
+    body: &[u8],
 ) -> Option<Response<Bytes>> {
     let ["flows", id, "messages"] = segments else {
         return None;
     };
+    if method == Method::POST {
+        return Some(send(store, id, body));
+    }
     if method != Method::GET {
         return Some(error(StatusCode::METHOD_NOT_ALLOWED, "wrong method"));
     }
@@ -71,6 +89,79 @@ pub(crate) fn route(
     };
     let body = serde_json::to_vec(&page).unwrap_or_default();
     Some(respond(StatusCode::OK, Bytes::from(body)))
+}
+
+/// `POST`: 202 once the message is queued; 404 unknown flow or not a WebSocket, 409 closed,
+/// 400 bad body, 413 too large, 429 rate limit.
+fn send(store: &FlowStore, id: &str, body: &[u8]) -> Response<Bytes> {
+    let id = id.parse::<u64>().ok();
+    let Some((id, flow)) = id.and_then(|id| Some((id, store.get(id)?))) else {
+        return error(StatusCode::NOT_FOUND, "no such flow");
+    };
+    let websocket = matches!(&flow, StoredFlow::Done(f)
+        if matches!(&f.record, Event::Exchange(x) if x.ws_messages.is_some()));
+    if !websocket {
+        return error(StatusCode::NOT_FOUND, "the flow is not a WebSocket");
+    }
+    let request: Send = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("bad message: {e}")),
+    };
+    let payload = match request.kind {
+        Kind::Text => request.data.into_bytes(),
+        Kind::Binary => match from_hex(&request.data) {
+            Some(bytes) => bytes,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "binary data must be hex digits, two per byte",
+                );
+            }
+        },
+        Kind::Close | Kind::Ping | Kind::Pong => {
+            return error(StatusCode::BAD_REQUEST, "type must be text or binary");
+        }
+    };
+    let injection = Injection {
+        kind: request.kind,
+        payload,
+    };
+    match store.ws().live().inject(id, request.direction, injection) {
+        Ok(()) => respond(
+            StatusCode::ACCEPTED,
+            Bytes::from_static(b"{\"queued\":true}"),
+        ),
+        Err(e) => {
+            let status = match e {
+                InjectError::Closed => StatusCode::CONFLICT,
+                InjectError::Invalid => StatusCode::PAYLOAD_TOO_LARGE,
+                InjectError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            };
+            error(status, &e.to_string())
+        }
+    }
+}
+
+/// Hex digits, two per byte, ASCII whitespace ignored.
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    let digits: Vec<u8> = text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .map(|b| {
+            char::from(b)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())
+        })
+        .collect::<Option<_>>()?;
+    if !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    Some(
+        digits
+            .chunks(2)
+            .map(|pair| pair[0] << 4 | pair[1])
+            .collect(),
+    )
 }
 
 fn param<'q>(query: &'q str, key: &str) -> Option<&'q str> {
@@ -119,7 +210,7 @@ mod tests {
                 kind: Kind::Text,
                 kept: format!("m{seq}").into_bytes(),
                 size: 2,
-                compressed: false,
+                compression: None,
             };
             let m = message(1, seq, Direction::ServerToClient, &parsed);
             store.apply(&FlowEvent::WsMessage(Arc::new(m)));
@@ -139,6 +230,7 @@ mod tests {
             &Method::GET,
             &["flows", "1", "messages"],
             "after=2&limit=1",
+            b"",
         )
         .expect("handled");
         assert_eq!(page.status(), StatusCode::OK);
@@ -160,16 +252,45 @@ mod tests {
     }
 
     #[test]
+    fn post_checks_the_flow_the_body_and_the_connection() {
+        let store = store();
+        let post = |id: &str, body: &str| {
+            route(
+                &store,
+                &Method::POST,
+                &["flows", id, "messages"],
+                "",
+                body.as_bytes(),
+            )
+            .expect("handled")
+            .status()
+        };
+        let text = r#"{"direction":"server_to_client","type":"text","data":"hi"}"#;
+        assert_eq!(post("9", text), StatusCode::NOT_FOUND);
+        assert_eq!(post("2", text), StatusCode::NOT_FOUND, "not a WebSocket");
+        assert_eq!(post("1", text), StatusCode::CONFLICT, "no live connection");
+        assert_eq!(post("1", "{}"), StatusCode::BAD_REQUEST);
+        let odd = r#"{"direction":"client_to_server","type":"binary","data":"abc"}"#;
+        assert_eq!(post("1", odd), StatusCode::BAD_REQUEST);
+        let ping = r#"{"direction":"client_to_server","type":"ping","data":""}"#;
+        assert_eq!(post("1", ping), StatusCode::BAD_REQUEST);
+        assert_eq!(from_hex("00 ff\n10"), Some(vec![0, 0xff, 0x10]));
+        assert_eq!(from_hex("zz"), None);
+    }
+
+    #[test]
     fn refuses_plain_flows_unknown_ids_and_other_methods() {
         let store = store();
-        let plain = route(&store, &Method::GET, &["flows", "2", "messages"], "").expect("handled");
+        let plain =
+            route(&store, &Method::GET, &["flows", "2", "messages"], "", b"").expect("handled");
         assert_eq!(plain.status(), StatusCode::NOT_FOUND);
         let missing =
-            route(&store, &Method::GET, &["flows", "9", "messages"], "").expect("handled");
+            route(&store, &Method::GET, &["flows", "9", "messages"], "", b"").expect("handled");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        let post = route(&store, &Method::POST, &["flows", "1", "messages"], "").expect("handled");
-        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert!(route(&store, &Method::GET, &["flows", "1"], "").is_none());
+        let put =
+            route(&store, &Method::PUT, &["flows", "1", "messages"], "", b"").expect("handled");
+        assert_eq!(put.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(route(&store, &Method::GET, &["flows", "1"], "", b"").is_none());
     }
 
     #[test]

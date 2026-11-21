@@ -97,8 +97,11 @@
 
   function bodyView(m) {
     const box = el("div", "ws-body");
-    if (m.compressed) {
-      box.append(el("p", "ws-note", "Compressed by a negotiated extension: raw payload shown."));
+    if (m.decode_failed) {
+      box.append(el("p", "ws-note", "Compressed, but it could not be decompressed: the raw payload is shown."));
+    } else if (m.compressed) {
+      const wire = typeof m.wire_size === "number" ? " (" + fmtSize(m.wire_size) + " on the wire)" : "";
+      box.append(el("p", "ws-note", "Decompressed from permessage-deflate" + wire + "."));
     }
     if (m.kind === "close") {
       const code = m.close_code === undefined ? "no code" : "code " + m.close_code;
@@ -123,6 +126,66 @@
         fmtSize(m.size) + " (--ws-body-limit)."));
     }
     return box;
+  }
+
+  function option(value, label) {
+    const o = el("option", null, label);
+    o.value = value;
+    return o;
+  }
+
+  /** The composer: POST /api/v1/flows/{id}/messages into the live connection. */
+  function composer(id) {
+    const form = el("form", "ws-composer");
+    form.setAttribute("aria-label", "Send a message");
+    const direction = el("select");
+    direction.setAttribute("aria-label", "Send to");
+    direction.append(option("server_to_client", "To the client"), option("client_to_server", "To the server"));
+    const type = el("select");
+    type.setAttribute("aria-label", "Message type");
+    type.append(option("text", "Text"), option("binary", "Binary (hex)"));
+    const data = el("textarea");
+    data.setAttribute("aria-label", "Message");
+    data.placeholder = "Message text, or hex bytes such as 01 ff 7a";
+    const send = el("button", null, "Send");
+    send.type = "submit";
+    const status = el("p", "ws-send-status");
+    status.setAttribute("role", "status");
+    type.addEventListener("change", () => {
+      data.placeholder = type.value === "text" ? "Message text" : "Hex bytes, such as 01 ff 7a";
+    });
+    form.append(direction, type, data, send, status);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      send.disabled = true;
+      status.classList.remove("error");
+      status.textContent = "Sending...";
+      try {
+        const response = await request("flows/" + id + "/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ direction: direction.value, type: type.value, data: data.value }),
+        });
+        if (response.ok) {
+          status.textContent = "Sent. It shows up in the list marked (sent by you).";
+        } else {
+          let reason = "the proxy refused it (" + response.status + ")";
+          try {
+            const body = await response.json();
+            if (body && body.error) reason = body.error;
+          } catch (_) { /* keep the status code */ }
+          if (response.status === 409) reason = "The connection is closed, so nothing can be sent.";
+          status.classList.add("error");
+          status.textContent = "Not sent: " + reason;
+        }
+      } catch (_) {
+        status.classList.add("error");
+        status.textContent = "Not sent: the proxy did not answer.";
+      } finally {
+        send.disabled = false;
+      }
+    });
+    return form;
   }
 
   /** One mounted view: history from the API, live rows from SSE, filters. */
@@ -163,7 +226,7 @@
     const list = el("div", "ws-list");
     list.setAttribute("role", "list");
     const detail = el("div", "ws-detail");
-    container.append(bar, notice, list, detail);
+    container.append(bar, notice, list, composer(id), detail);
     search.addEventListener("input", () => { state.filter = search.value.toLowerCase(); draw(); });
 
     function visible(m) {
@@ -181,7 +244,9 @@
       r.append(el("span", sent ? "ws-dir ws-sent" : "ws-dir ws-recv", sent ? "↑ sent" : "↓ recv"));
       const offset = state.first === null ? 0 : m.timestamp - state.first;
       r.append(el("span", "ws-time", "+" + offset.toFixed(3) + " s"));
-      r.append(el("span", "ws-kind ws-kind-" + m.kind, m.kind));
+      const kind = el("span", "ws-kind ws-kind-" + m.kind, m.kind);
+      if (m.injected) kind.append(el("span", "ws-injected", "(sent by you)"));
+      r.append(kind);
       r.append(el("span", "ws-size", fmtSize(m.size) + (m.truncated ? " (truncated)" : "")));
       let preview = m.kind === "close"
         ? "code " + (m.close_code === undefined ? "-" : m.close_code) + (m.close_reason ? " " + m.close_reason : "")

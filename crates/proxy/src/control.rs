@@ -300,7 +300,9 @@ fn module_routes(
 ) -> Option<Response<ControlBody>> {
     let method = request.method();
     let query = request.uri().query().unwrap_or_default();
-    if let Some(response) = crate::ws_api::route(&state.store, method, segments, query) {
+    if let Some(response) =
+        crate::ws_api::route(&state.store, method, segments, query, request.body())
+    {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
     }
     if let Some(response) = crate::har_api::route(&state.store, method, segments, query) {
