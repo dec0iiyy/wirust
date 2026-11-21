@@ -136,12 +136,43 @@ function kindOf(contentType) {
   return "binary";
 }
 
+/**
+ * HTTP version shown for an exchange: the client leg, and the server leg after an arrow when
+ * it differs ("h2→http/1.1"). Keep in step with `Exchange::protocol` in flow.rs, which the
+ * terminal log uses, so both show the same text for the same flow.
+ */
+function protoLabel(f) {
+  const client = f.client_version || "";
+  return f.upstream_version && f.upstream_version !== client ? client + "→" + f.upstream_version : client;
+}
+
+/**
+ * The ClientHello facts of a flow in one shape: an exchange's `tls`, a failed handshake's
+ * top-level fields and a passthrough tunnel's `tls` (whose known client is `known_client`).
+ * Null when the flow had no TLS.
+ */
+function tlsOf(f) {
+  if (f.type === "tls_failure") {
+    return { sni: f.sni, ja4: f.ja4, client: f.known_client, version: null, alpn: null, ja3_hash: null };
+  }
+  const tls = f.tls;
+  if (!tls) return null;
+  if (f.type === "tunnel") {
+    return { sni: tls.sni, ja4: tls.ja4, client: tls.known_client, version: null,
+      alpn: null, alpn_offered: tls.alpn_offered, ja3_hash: tls.ja3_hash };
+  }
+  return tls;
+}
+
 /** Normalises a stored flow (`{state, flow}`) or an SSE payload into a row model. */
 function model(state, f) {
   const m = { id: f.id, state, raw: f, search: null };
   m.rules = (f.flags || []).filter((x) => x.startsWith("rule:")).map((x) => x.slice(5));
   m.time = clock(f.time);
   m.timeSort = f.time;
+  const tls = tlsOf(f);
+  m.client = tls ? tls.client || (tls.ja4 ? "ja4 " + tls.ja4 : "") : "";
+  m.clientTitle = tls ? [tls.client, tls.ja4 && "JA4 " + tls.ja4].filter(Boolean).join("\n") : "";
   if (state === "pending" || f.type === "exchange") {
     const parts = splitUrl(f.url);
     m.kind = "exchange";
@@ -149,8 +180,9 @@ function model(state, f) {
     m.url = f.url;
     m.host = parts.host;
     m.path = parts.path;
-    m.proto = f.client_version || "";
-    m.client = f.tls && f.tls.client ? f.tls.client : "";
+    m.proto = protoLabel(f);
+    m.protoTitle = f.upstream_version && f.upstream_version !== f.client_version
+      ? "client leg " + f.client_version + ", server leg " + f.upstream_version : "";
     m.status = f.status == null ? null : f.status;
     m.error = f.error || null;
     m.size = f.response_body ? f.response_body.size : null;
@@ -163,7 +195,7 @@ function model(state, f) {
     m.path = "handshake failed: " + f.reason;
     m.url = f.target;
     m.proto = "";
-    m.client = f.known_client || "";
+    m.protoTitle = "";
     m.status = null;
     m.error = f.reason;
     m.size = null;
@@ -173,10 +205,10 @@ function model(state, f) {
     m.kind = "tunnel";
     m.method = "TUNNEL";
     m.host = f.target;
-    m.path = "not TLS, passed through";
+    m.path = f.tls ? "TLS passthrough, not decrypted" : "not TLS, passed through";
     m.url = f.target;
     m.proto = "tcp";
-    m.client = "";
+    m.protoTitle = "";
     m.status = null;
     m.error = f.error || null;
     m.size = f.bytes_down;
@@ -367,10 +399,11 @@ function fillRow(row, m, index) {
   c.status.textContent = text;
   c.status.className = "c-status " + cls;
   c.proto.textContent = m.proto;
+  c.proto.title = m.protoTitle;
   c.size.textContent = fmtSize(m.size);
   c.dur.textContent = fmtMs(m.duration);
   c.client.textContent = m.client;
-  c.client.title = m.client;
+  c.client.title = m.clientTitle;
 }
 
 function renderRows(force) {
@@ -742,7 +775,8 @@ function overview(panel, m) {
     return;
   }
   if (m.kind === "tunnel") {
-    panel.append(h("h3", null, "Tunnel (not TLS, passed through without inspection)"));
+    panel.append(h("h3", null, f.tls ? "Tunnel (TLS, relayed without decryption)"
+      : "Tunnel (not TLS, passed through without inspection)"));
     if (f.error) panel.append(h("div", "error-box", f.error));
     panel.append(kv([["Target", f.target, "mono"], ["Client", f.client, "mono"], ["Closed", f.time],
       ["Bytes up", fmtSize(f.bytes_up)], ["Bytes down", fmtSize(f.bytes_down)]]));
@@ -802,9 +836,7 @@ function waterfall(t) {
 
 function clientTls(panel, m) {
   const f = m.raw;
-  const tls = m.kind === "tls_failure"
-    ? { sni: f.sni, ja4: f.ja4, client: f.known_client, version: null, alpn: null, ja3_hash: null }
-    : f.tls;
+  const tls = tlsOf(f);
   if (!tls) {
     panel.append(h("p", "hint", m.kind === "tunnel"
       ? "No TLS: the tunnel was not TLS." : "Plain HTTP: no TLS between the client and the proxy."));
@@ -825,7 +857,8 @@ function clientTls(panel, m) {
     ["Matched client", tls.client || "no known client with this JA4"],
     ["TLS version", tls.version ? tls.version.replace("TLSv1_", "TLS 1.") : null],
     ["SNI", tls.sni || "(none)", "mono"],
-    ["ALPN", tls.alpn || "(none)", "mono"],
+    ["ALPN", tls.alpn || (tls.alpn_offered && tls.alpn_offered.length
+      ? "offered: " + tls.alpn_offered.join(", ") : "(none)"), "mono"],
     ["JA4", tls.ja4, "mono"],
     ["JA3 hash", tls.ja3_hash, "mono"],
   ]));
@@ -854,7 +887,7 @@ function responseTab(panel, m) {
     panel.append(h("p", "hint", "Waiting for the response."));
     return;
   }
-  if (f.status != null) panel.append(h("div", "url", f.upstream_version + " " + f.status + " " + (f.reason || "")));
+  if (f.status != null) panel.append(h("div", "url", (f.upstream_version || f.client_version) + " " + f.status + " " + (f.reason || "")));
   if (f.error) panel.append(h("div", "error-box", "Error: " + f.error));
   panel.append(h("h3", null, "Headers"));
   panel.append(headersTable(f.response_headers));

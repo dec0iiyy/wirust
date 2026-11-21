@@ -93,10 +93,16 @@ async fn respond(request: Request<Incoming>) -> anyhow::Result<Response<Full<Byt
 
 /// Serves HTTPS (h2 or HTTP/1.1 by ALPN) on a random port; returns the port.
 pub async fn https_server(certs: &UpstreamCerts) -> anyhow::Result<u16> {
+    https_server_with_alpn(certs, &[b"h2", b"http/1.1"]).await
+}
+
+/// Like [`https_server`], but offering only `alpn`: `&[b"http/1.1"]` is a server that never
+/// speaks h2, whatever the client offers.
+pub async fn https_server_with_alpn(certs: &UpstreamCerts, alpn: &[&[u8]]) -> anyhow::Result<u16> {
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![certs.leaf.clone()], certs.key.clone_key())?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();

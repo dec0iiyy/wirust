@@ -24,7 +24,7 @@
   --w-recv: #6fcf97;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --row-h: 24px;
-  --cols: 52px 104px 66px minmax(120px, 1.2fr) minmax(160px, 2.4fr) 62px 66px 70px 68px minmax(90px, 1fr);
+  --cols: 52px 104px 66px minmax(120px, 1.2fr) minmax(160px, 2.4fr) 62px 96px 70px 68px minmax(90px, 1fr);
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {

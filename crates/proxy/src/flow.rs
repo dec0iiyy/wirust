@@ -72,6 +72,22 @@ pub struct Exchange {
     pub ws_messages: Option<u64>,
 }
 
+impl Exchange {
+    /// The HTTP version the log and the web UI show for this exchange: the client leg, and
+    /// the server leg after an arrow when it differs, such as `h2→http/1.1` for an HTTP/2
+    /// client whose server only speaks HTTP/1.1. The web UI builds the same text from
+    /// `client_version` and `upstream_version`.
+    #[must_use]
+    pub fn protocol(&self) -> String {
+        match self.upstream_version.as_deref() {
+            Some(server) if server != self.client_version => {
+                format!("{}→{server}", self.client_version)
+            }
+            _ => self.client_version.clone(),
+        }
+    }
+}
+
 /// Something the interceptor chain did to an exchange. Serialised as its [`Display`] text,
 /// such as `"responded"` or `"rule:mock-users"`, and read back from the same text.
 ///
@@ -350,8 +366,7 @@ impl fmt::Display for Event {
                     (None, Some(error)) => write!(f, "  ERROR {error}")?,
                     (None, None) => {}
                 }
-                let version = x.upstream_version.as_deref().unwrap_or(&x.client_version);
-                write!(f, "  {version}  {:.0} ms", x.timing.total_ms)?;
+                write!(f, "  {}  {:.0} ms", x.protocol(), x.timing.total_ms)?;
                 if let Some(body) = &x.response_body {
                     write!(f, "  {} B", body.size)?;
                 }
@@ -428,6 +443,34 @@ mod tests {
         let mut capture = Capture::new(2);
         capture.push("aé".as_bytes());
         assert_eq!(BodyRecord::from(&capture).data, "a");
+    }
+
+    fn exchange(client: &str, server: Option<&str>) -> Exchange {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "time": "2026-01-02T03:04:05Z", "client": "127.0.0.1:1", "method": "GET",
+            "url": "https://example.test/", "client_version": client, "upstream_version": server,
+            "status": null, "reason": null, "request_headers": [], "response_headers": [],
+            "request_body": {"size": 0, "truncated": false, "encoding": "utf8", "data": ""},
+            "response_body": null, "timing": {"total_ms": 1.0}, "tls": null, "error": null,
+        }))
+        .unwrap_or_else(|e| panic!("fixture: {e}"))
+    }
+
+    #[test]
+    fn the_protocol_names_the_client_leg_and_a_different_server_leg() {
+        let table = [
+            ("http/1.1", Some("http/1.1"), "http/1.1"),
+            ("h2", Some("h2"), "h2"),
+            ("h2", Some("http/1.1"), "h2→http/1.1"),
+            ("http/1.1", Some("h2"), "http/1.1→h2"),
+            ("h2", None, "h2"),
+        ];
+        for (client, server, want) in table {
+            let x = exchange(client, server);
+            assert_eq!(x.protocol(), want, "client {client}, server {server:?}");
+            let line = Event::Exchange(Box::new(x)).to_string();
+            assert!(line.contains(&format!("  {want}  ")), "{line}");
+        }
     }
 
     #[test]

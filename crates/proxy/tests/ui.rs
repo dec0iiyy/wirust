@@ -158,6 +158,101 @@ fn ui_files_use_no_html_sinks_dynamic_code_or_remote_urls() -> TestResult {
     Ok(())
 }
 
+/// The source of `function NAME(...) { ... }` in `app.js`, up to its matching brace.
+fn js_function<'a>(source: &'a str, name: &str) -> anyhow::Result<&'a str> {
+    let start = source
+        .find(&format!("function {name}("))
+        .ok_or_else(|| anyhow::anyhow!("app.js has no function {name}"))?;
+    let mut depth = 0_usize;
+    for (offset, c) in source[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(&source[start..=start + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    anyhow::bail!("function {name} in app.js is not closed")
+}
+
+/// Runs the row helpers of `app.js` in Node and checks them against the Rust side: the Proto
+/// column must show what the terminal log shows (`Exchange::protocol`), and a passthrough
+/// tunnel must give the Client column its known client and JA4 like a decrypted flow does.
+/// Skipped, with a note, where Node is not installed (the CI runners have it).
+#[test]
+fn the_row_helpers_agree_with_the_log_and_name_passthrough_clients() -> TestResult {
+    let node = std::process::Command::new("node").arg("--version").output();
+    if node.is_err() {
+        eprintln!("skipped: node is not installed");
+        return Ok(());
+    }
+    let app = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app.js"))?;
+    let helpers = format!(
+        "{}\n{}\nreturn {{ protoLabel, tlsOf }};",
+        js_function(&app, "protoLabel")?,
+        js_function(&app, "tlsOf")?
+    );
+    let versions = [
+        ("http/1.1", Some("http/1.1")),
+        ("h2", Some("h2")),
+        ("h2", Some("http/1.1")),
+        ("http/1.1", Some("h2")),
+        ("h2", None),
+    ];
+    let tunnel_tls = serde_json::json!({
+        "sni": "a.test", "alpn_offered": ["h2", "http/1.1"], "ja4": "t13d1516h2_x_y",
+        "ja3_hash": "z", "known_client": "Chrome 131",
+    });
+    let input = serde_json::json!({
+        "exchanges": versions.iter()
+            .map(|(client, server)| serde_json::json!({
+                "client_version": client, "upstream_version": server,
+            }))
+            .collect::<Vec<_>>(),
+        "tunnel": { "type": "tunnel", "tls": tunnel_tls },
+        "plain_tunnel": { "type": "tunnel", "tls": null },
+        "failure": { "type": "tls_failure", "sni": "b.test", "ja4": "t13d_f", "known_client": null },
+    });
+    let script = "const f = new Function(process.argv[1])(); const input = JSON.parse(process.argv[2]); \
+        console.log(JSON.stringify({ protos: input.exchanges.map(f.protoLabel), \
+        tunnel: f.tlsOf(input.tunnel), plain_tunnel: f.tlsOf(input.plain_tunnel), \
+        failure: f.tlsOf(input.failure) }));";
+    let output = std::process::Command::new("node")
+        .args(["-e", script, &helpers, &input.to_string()])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    for (i, (client, server)) in versions.iter().enumerate() {
+        let exchange: wirust::flow::Exchange = serde_json::from_value(serde_json::json!({
+            "id": 1, "time": "2026-01-02T03:04:05Z", "client": "127.0.0.1:1", "method": "GET",
+            "url": "https://example.test/", "client_version": client, "upstream_version": server,
+            "status": null, "reason": null, "request_headers": [], "response_headers": [],
+            "request_body": {"size": 0, "truncated": false, "encoding": "utf8", "data": ""},
+            "response_body": null, "timing": {"total_ms": 1.0}, "tls": null, "error": null,
+        }))?;
+        assert_eq!(
+            shown["protos"][i],
+            exchange.protocol(),
+            "the UI and the log disagree for client {client}, server {server:?}"
+        );
+    }
+    assert_eq!(shown["tunnel"]["client"], "Chrome 131", "{shown}");
+    assert_eq!(shown["tunnel"]["ja4"], "t13d1516h2_x_y", "{shown}");
+    assert_eq!(shown["tunnel"]["alpn_offered"], tunnel_tls["alpn_offered"]);
+    assert!(shown["plain_tunnel"].is_null(), "{shown}");
+    assert_eq!(shown["failure"]["ja4"], "t13d_f", "{shown}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn info_names_the_proxy_and_the_ca_fingerprint() -> TestResult {
     let ui = start_ui().await?;
