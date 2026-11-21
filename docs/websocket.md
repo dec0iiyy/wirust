@@ -100,7 +100,21 @@ upgrade.
 - `GET /api/v1/flows/{id}/messages?after=SEQ&limit=N` (token required, like every API
   route): `{"flow_id", "total", "dropped", "messages": [WsMessage...]}`, messages with
   `seq > after` (all when absent), oldest first, `limit` default 200, at most 1000. `404`
-  for an unknown flow or one that is not a WebSocket; `405` for other methods.
+  for an unknown flow or one that is not a WebSocket; `405` for methods other than GET and
+  POST.
+- `POST /api/v1/flows/{id}/messages` with `{"direction": "client_to_server" |
+  "server_to_client", "type": "text" | "binary", "data": "..."}` sends a message into the
+  live connection: `client_to_server` goes to the server (masked with a random key, as a
+  client must), `server_to_client` to the client (unmasked). Binary `data` is hex, two digits
+  per byte, spaces allowed. The frame is a single unfragmented, uncompressed frame (RSV1
+  clear, which `permessage-deflate` allows); it is written between messages, never inside a
+  fragmented message of the same direction, so it may wait for that message's last frame.
+  When it is written, it is recorded like any other message with `injected: true`.
+  Answers: `202 {"queued": true}`; `404` unknown flow or not a WebSocket; `409` the
+  connection is closed; `400` a bad body or a type other than text and binary; `413` more
+  than 64 KiB (`ws::MAX_INJECT`); `429` more than 20 messages per second per connection
+  (`ws::INJECT_PER_SECOND`) or 16 waiting in one direction. After a protocol violation in a
+  direction (see above) its framing is unknown, so waiting messages for it are dropped.
 - The SSE stream `GET /api/v1/events` carries `{"event": "ws", "flow": {...WsMessage...}}`.
   Consumers that only want flows ignore it: `FlowEvent::flow()` returns `None` for it, so
   the log printer and the session writer skip it.
@@ -132,7 +146,10 @@ Files without message lines load as before. wirust 0.2 and older stop at a messa
 history from the API, live rows from its own SSE stream, direction arrows with a text label,
 time offset from the first message, size and kind, JSON pretty-printed, binary as a hex dump,
 close frames with code and reason, a text filter, a direction toggle, truncation notices and
-a note on decompressed (or undecodable) compressed messages.
+a note on decompressed (or undecodable) compressed messages. A composer under the list sends a
+message (to the client or to the server, text or hex bytes) through the POST route above and
+says in plain words why it was not sent (closed connection, too large, too many); injected
+messages are marked "(sent by you)".
 It registers through `window.registerTab({id, title, visible, render(flow, container)})` when
 app.js provides it, and otherwise adds its own tab button.
 
@@ -141,7 +158,8 @@ app.js provides it, and otherwise adds its own tab button.
 - WebSocket over HTTP/2 (RFC 8441 extended CONNECT) and HTTP/3 WebTransport.
 - gRPC streams, Socket.IO or other application framing beyond raw messages.
 - Other compression extensions (`x-webkit-deflate-frame` and the like): recorded raw.
-- Sending, replaying or editing messages, and breakpoints on messages.
+- Editing or dropping messages in flight, breakpoints on messages, and replaying a recorded
+  conversation; injected frames are always unfragmented and uncompressed.
 - A bus subscriber that falls more than 4096 events behind skips events: during a flood the
   store or the UI may miss messages (the SSE stream says `: lagged`).
 - Memory: the worst case is `--max-flows` x `--ws-max-messages` x `--ws-body-limit`; lower

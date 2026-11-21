@@ -32,7 +32,7 @@ built in parallel without editing the same functions.
 | `throttle.rs` | `Throttled`, the bandwidth-capped streaming body |
 | `har.rs`, `har_api.rs`, `session.rs` | HAR 1.2 export and import, the `/api/v1/har` route, session files (`--session`, `export`, `import`, `view`); `docs/interchange.md` |
 | `query.rs`, `curl.rs` | the search query language (`?q=`, `--filter`) and the cURL export (`/api/v1/flows/{id}/curl`) |
-| `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `GET /api/v1/flows/{id}/messages`; `docs/websocket.md` |
+| `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `permessage-deflate` inflation of the recorded copy, `GET` and `POST /api/v1/flows/{id}/messages` (`ws::Live` holds the open connections that accept injected messages); `docs/websocket.md` |
 | `grpc.rs`, `protobuf.rs`, `grpc_api.rs` | gRPC, gRPC-Web and protobuf decoding of recorded bodies: framing, status from `response_trailers`, the schema-less decoder, `GET /api/v1/flows/{id}/grpc`; `docs/grpc.md` |
 | `ui/` | static files embedded with `include_bytes!` (`index.html`, `panels.js`, `app.js`, `style.css`, `ws.js` and `ws.css` for the Messages tab, `grpc.js` and `grpc.css` for the gRPC tab) |
 

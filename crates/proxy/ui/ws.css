@@ -26,6 +26,12 @@
 .ws-json-key { opacity: 0.75; }
 .ws-json-string { color: #0a3069; }
 .ws-json-number, .ws-json-boolean { color: #8250df; }
+.ws-injected { font-size: 0.8em; opacity: 0.8; margin-left: 4px; }
+.ws-composer { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.ws-composer textarea { flex: 1 1 260px; min-height: 2.6em; font: 0.9em ui-monospace, monospace; padding: 3px 6px; }
+.ws-composer select, .ws-composer button { font: inherit; }
+.ws-send-status { flex-basis: 100%; margin: 0; font-size: 0.9em; }
+.ws-send-status.error { color: #cf222e; }
 @media (prefers-color-scheme: dark) {
   .ws-sent { color: #3fb950; }
   .ws-recv { color: #58a6ff; }

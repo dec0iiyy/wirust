@@ -146,6 +146,10 @@ pub enum Encoding {
 
 /// One recorded WebSocket message, as the API, the event stream and HAR carry it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent JSON flags of the interchange format"
+)]
 pub struct WsMessage {
     /// The upgrade exchange this message belongs to.
     pub flow_id: u64,
@@ -184,6 +188,9 @@ pub struct WsMessage {
     /// extension): `data` and `size` are the raw wire payload, in base64.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub decode_failed: bool,
+    /// The control plane sent this message into the connection (`POST .../messages`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub injected: bool,
 }
 
 impl WsMessage {
@@ -638,6 +645,13 @@ impl FrameParser {
             + self.control.as_ref().map_or(0, |m| m.kept.capacity())
     }
 
+    /// Whether the stream is between messages: no partial header, frame or fragmented
+    /// message, and no violation. Only then can a frame be inserted.
+    #[must_use]
+    pub fn between_messages(&self) -> bool {
+        self.failed.is_none() && self.have == 0 && self.frame.is_none() && self.message.is_none()
+    }
+
     /// Feeds the next bytes of the stream; complete messages go to `out`. After a
     /// violation it ignores everything.
     pub fn feed(&mut self, mut bytes: &[u8], out: &mut Vec<Parsed>) {
@@ -883,6 +897,7 @@ pub fn message(flow_id: u64, seq: u64, direction: Direction, parsed: &Parsed) ->
         compressed: parsed.compression.is_some(),
         wire_size: parsed.compression.map(|c| c.wire_size),
         decode_failed,
+        injected: false,
     }
 }
 
@@ -931,6 +946,193 @@ pub fn negotiated(headers: &HeaderMap) -> Extensions {
     }
 }
 
+/// Most payload bytes one injected message may carry.
+pub const MAX_INJECT: usize = 64 * 1024;
+
+/// Injected messages one connection accepts per second.
+pub const INJECT_PER_SECOND: u32 = 20;
+
+/// Injected messages one direction queues while a fragmented message is in flight.
+const INJECT_QUEUE: usize = 16;
+
+/// A message the control plane sends into a live connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Injection {
+    /// Text or binary.
+    pub kind: Kind,
+    /// The payload, unmasked.
+    pub payload: Vec<u8>,
+}
+
+/// Why [`Live::inject`] refused a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectError {
+    /// The connection is closed (or never was a captured WebSocket).
+    Closed,
+    /// More than [`MAX_INJECT`] bytes, or not text or binary.
+    Invalid,
+    /// More than [`INJECT_PER_SECOND`] messages this second, or the queue is full.
+    RateLimited,
+}
+
+impl std::fmt::Display for InjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Closed => "the connection is closed",
+            Self::Invalid => "only text or binary messages up to 64 KiB can be sent",
+            Self::RateLimited => "too many messages: wait a moment and send again",
+        })
+    }
+}
+
+impl std::error::Error for InjectError {}
+
+#[derive(Debug)]
+struct LiveConn {
+    up: tokio::sync::mpsc::Sender<Injection>,
+    down: tokio::sync::mpsc::Sender<Injection>,
+    window: (std::time::Instant, u32),
+}
+
+/// The open WebSocket connections that accept injected messages, by flow id.
+#[derive(Debug, Clone, Default)]
+pub struct Live {
+    inner: Arc<Mutex<HashMap<u64, LiveConn>>>,
+}
+
+/// Unregisters a connection from [`Live`] when the pump ends.
+#[derive(Debug)]
+struct LiveGuard {
+    live: Live,
+    flow_id: u64,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.live.lock().remove(&self.flow_id);
+    }
+}
+
+type Inbox = tokio::sync::mpsc::Receiver<Injection>;
+
+impl Live {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, LiveConn>> {
+        self.inner.lock().expect("ws live lock poisoned")
+    }
+
+    fn register(&self, flow_id: u64) -> (LiveGuard, Inbox, Inbox) {
+        let (up, up_inbox) = tokio::sync::mpsc::channel(INJECT_QUEUE);
+        let (down, down_inbox) = tokio::sync::mpsc::channel(INJECT_QUEUE);
+        let conn = LiveConn {
+            up,
+            down,
+            window: (std::time::Instant::now(), 0),
+        };
+        self.lock().insert(flow_id, conn);
+        let guard = LiveGuard {
+            live: self.clone(),
+            flow_id,
+        };
+        (guard, up_inbox, down_inbox)
+    }
+
+    /// Whether flow `flow_id` is an open, captured WebSocket connection.
+    #[must_use]
+    pub fn is_open(&self, flow_id: u64) -> bool {
+        self.lock().contains_key(&flow_id)
+    }
+
+    /// Queues `injection` toward `direction`'s receiver: [`Direction::ClientToServer`] sends
+    /// it to the server (masked, as a client would), [`Direction::ServerToClient`] to the
+    /// client. It is written between messages, never inside a fragmented one, and recorded
+    /// with `injected: true` when written.
+    ///
+    /// # Errors
+    ///
+    /// [`InjectError`] when the connection is closed, the message too large or not text or
+    /// binary, or the rate limit is reached.
+    pub fn inject(
+        &self,
+        flow_id: u64,
+        direction: Direction,
+        injection: Injection,
+    ) -> Result<(), InjectError> {
+        if injection.payload.len() > MAX_INJECT || injection.kind.is_control() {
+            return Err(InjectError::Invalid);
+        }
+        let mut live = self.lock();
+        let conn = live.get_mut(&flow_id).ok_or(InjectError::Closed)?;
+        let now = std::time::Instant::now();
+        if now.duration_since(conn.window.0) >= std::time::Duration::from_secs(1) {
+            conn.window = (now, 0);
+        }
+        if conn.window.1 >= INJECT_PER_SECOND {
+            return Err(InjectError::RateLimited);
+        }
+        let sender = match direction {
+            Direction::ClientToServer => &conn.up,
+            Direction::ServerToClient => &conn.down,
+        };
+        sender.try_send(injection).map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => InjectError::RateLimited,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => InjectError::Closed,
+        })?;
+        conn.window.1 += 1;
+        Ok(())
+    }
+}
+
+/// One unfragmented frame of `kind` with `payload`, masked with a random key when it goes
+/// to the server (RFC 6455 section 5.3).
+#[must_use]
+pub fn encode_frame(direction: Direction, kind: Kind, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + MAX_HEADER);
+    out.push(0x80 | kind.opcode());
+    let mask_bit = if direction == Direction::ClientToServer {
+        0x80
+    } else {
+        0
+    };
+    // 7-bit length, or 0x7E with 16 bits, or 0x7F with 64 bits (RFC 6455 section 5.2).
+    let len = payload.len();
+    if let Ok(short) = u8::try_from(len)
+        && short < 0x7E
+    {
+        out.push(mask_bit | short);
+    } else if let Ok(len16) = u16::try_from(len) {
+        out.push(mask_bit | 0x7E);
+        out.extend_from_slice(&len16.to_be_bytes());
+    } else {
+        out.push(mask_bit | 0x7F);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    if direction == Direction::ClientToServer {
+        let key = mask_key();
+        out.extend_from_slice(&key);
+        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+    } else {
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
+fn mask_key() -> [u8; 4] {
+    let mut key = [0_u8; 4];
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .secure_random
+        .fill(&mut key)
+        .is_err()
+    {
+        // Masking only stops cache poisoning by in-page scripts; any key is valid framing.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        key = nanos.to_le_bytes();
+    }
+    key
+}
+
 /// Numbers and publishes the messages of one connection, both directions in one order.
 #[derive(Debug)]
 struct Recorder {
@@ -940,10 +1142,11 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn record(&self, direction: Direction, parsed: &Parsed) {
+    fn record(&self, direction: Direction, parsed: &Parsed, injected: bool) {
         // Numbering and publishing under one lock keeps the bus in `seq` order.
         let mut next = self.next.lock().expect("ws recorder lock poisoned");
-        let message = message(self.flow_id, *next, direction, parsed);
+        let mut message = message(self.flow_id, *next, direction, parsed);
+        message.injected = injected;
         *next += 1;
         self.bus.publish(FlowEvent::WsMessage(Arc::new(message)));
     }
@@ -951,14 +1154,15 @@ impl Recorder {
 
 /// Joins the upgraded `client` and `server` streams of WebSocket flow `flow_id`, forwarding
 /// bytes unchanged both ways and publishing each message as [`FlowEvent::WsMessage`].
-/// Returns when either side closes or fails.
+/// While it runs, `live` accepts messages to inject into the connection. Returns when
+/// either side closes or fails.
 pub async fn pump<C, S>(
-    client: C,
-    server: S,
+    (client, server): (C, S),
     flow_id: u64,
     bus: Bus,
     limits: WsLimits,
     extensions: Extensions,
+    live: &Live,
 ) where
     C: AsyncRead + AsyncWrite,
     S: AsyncRead + AsyncWrite,
@@ -968,13 +1172,14 @@ pub async fn pump<C, S>(
         bus,
         next: Mutex::new(0),
     };
+    let (_guard, up_inbox, down_inbox) = live.register(flow_id);
     let (client_read, client_write) = tokio::io::split(client);
     let (server_read, server_write) = tokio::io::split(server);
     let up = FrameParser::new(Direction::ClientToServer, extensions, limits.body_limit);
     let down = FrameParser::new(Direction::ServerToClient, extensions, limits.body_limit);
     let _ = tokio::try_join!(
-        one_way(client_read, server_write, up, &recorder),
-        one_way(server_read, client_write, down, &recorder),
+        one_way(client_read, server_write, up, up_inbox, &recorder),
+        one_way(server_read, client_write, down, down_inbox, &recorder),
     );
 }
 
@@ -982,6 +1187,7 @@ async fn one_way<R, W>(
     mut from: R,
     mut to: W,
     mut parser: FrameParser,
+    mut inbox: Inbox,
     recorder: &Recorder,
 ) -> std::io::Result<()>
 where
@@ -990,18 +1196,53 @@ where
 {
     let mut buf = vec![0_u8; CHUNK];
     let mut out = Vec::new();
+    let mut queued: VecDeque<Injection> = VecDeque::new();
     loop {
-        let n = from.read(&mut buf).await?;
-        if n == 0 {
-            return to.shutdown().await;
+        tokio::select! {
+            read = from.read(&mut buf) => {
+                let n = read?;
+                if n == 0 {
+                    return to.shutdown().await;
+                }
+                // Forward first: parsing never delays the traffic.
+                to.write_all(&buf[..n]).await?;
+                parser.feed(&buf[..n], &mut out);
+                for parsed in out.drain(..) {
+                    recorder.record(parser.direction, &parsed, false);
+                }
+            }
+            Some(injection) = inbox.recv(), if queued.len() < INJECT_QUEUE => {
+                queued.push_back(injection);
+            }
         }
-        // Forward first: parsing never delays the traffic.
-        to.write_all(&buf[..n]).await?;
-        parser.feed(&buf[..n], &mut out);
-        for parsed in out.drain(..) {
-            recorder.record(parser.direction, &parsed);
+        if parser.failed().is_some() {
+            // The stream's framing is unknown: inserting a frame could corrupt it.
+            queued.clear();
+        } else if parser.between_messages() {
+            while let Some(injection) = queued.pop_front() {
+                write_injection(&mut to, parser.direction, injection, recorder).await?;
+            }
         }
     }
+}
+
+async fn write_injection<W: AsyncWrite + Unpin>(
+    to: &mut W,
+    direction: Direction,
+    injection: Injection,
+    recorder: &Recorder,
+) -> std::io::Result<()> {
+    to.write_all(&encode_frame(direction, injection.kind, &injection.payload))
+        .await?;
+    to.flush().await?;
+    let parsed = Parsed {
+        kind: injection.kind,
+        size: injection.payload.len() as u64,
+        kept: injection.payload,
+        compression: None,
+    };
+    recorder.record(direction, &parsed, true);
+    Ok(())
 }
 
 /// The recorded messages of each WebSocket flow, at most [`WsLimits::max_messages`] per
@@ -1010,6 +1251,7 @@ where
 pub struct WsStore {
     inner: Arc<Mutex<HashMap<u64, VecDeque<Arc<WsMessage>>>>>,
     max_messages: usize,
+    live: Live,
 }
 
 impl WsStore {
@@ -1019,7 +1261,14 @@ impl WsStore {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             max_messages: max_messages.max(1),
+            live: Live::default(),
         }
+    }
+
+    /// The open connections of these flows, for injecting messages.
+    #[must_use]
+    pub fn live(&self) -> &Live {
+        &self.live
     }
 
     /// Adds `message`, dropping its flow's oldest message when full.
@@ -1472,6 +1721,122 @@ mod tests {
         let record = message(1, 0, S2C, &out[0]);
         assert!(record.decode_failed);
         assert_eq!(record.size, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn injected_frames_are_framed_per_direction_and_wait_for_fragments() {
+        let (client_side, mut client) = tokio::io::duplex(1 << 16);
+        let (server_side, mut server) = tokio::io::duplex(1 << 16);
+        let bus = Bus::new();
+        let mut events = bus.subscribe();
+        let live = Live::default();
+        let pump_live = live.clone();
+        let pump = tokio::spawn(async move {
+            let limits = WsLimits::default();
+            pump(
+                (client_side, server_side),
+                7,
+                bus,
+                limits,
+                Extensions::None,
+                &pump_live,
+            )
+            .await;
+        });
+        while !live.is_open(7) {
+            tokio::task::yield_now().await;
+        }
+        let key = [1, 2, 3, 4];
+        let first = frame(false, 1, b"ab", Some(key));
+        client.write_all(&first).await.expect("write");
+        let mut got = vec![0; first.len()];
+        server.read_exact(&mut got).await.expect("read");
+        // A fragmented message is in flight: the injection waits for its end.
+        let text = Injection {
+            kind: Kind::Text,
+            payload: b"INJ".to_vec(),
+        };
+        live.inject(7, C2S, text).expect("queued");
+        let last = frame(true, 0, b"cd", Some(key));
+        client.write_all(&last).await.expect("write");
+        let mut got = vec![0; last.len()];
+        server.read_exact(&mut got).await.expect("read");
+        assert_eq!(got, last, "the fragment comes before the injected frame");
+        let mut head = [0; 6];
+        server.read_exact(&mut head).await.expect("read");
+        let header = parse_header(&head, C2S, Extensions::None)
+            .expect("valid")
+            .expect("whole");
+        assert_eq!((header.fin, header.opcode, header.len), (true, 1, 3));
+        let mask = header.mask.expect("client frames are masked");
+        let mut payload = [0; 3];
+        server.read_exact(&mut payload).await.expect("read");
+        let plain: Vec<u8> = payload
+            .iter()
+            .zip(mask.iter().cycle())
+            .map(|(b, k)| b ^ k)
+            .collect();
+        assert_eq!(plain, b"INJ");
+
+        let binary = Injection {
+            kind: Kind::Binary,
+            payload: vec![1, 2, 3],
+        };
+        live.inject(7, S2C, binary).expect("queued");
+        let mut down = [0; 5];
+        client.read_exact(&mut down).await.expect("read");
+        assert_eq!(down, [0x82, 3, 1, 2, 3], "server frames are not masked");
+
+        let mut injected = Vec::new();
+        while injected.len() < 3 {
+            if let Ok(FlowEvent::WsMessage(m)) = events.recv().await {
+                injected.push((m.data.clone(), m.injected));
+            }
+        }
+        assert_eq!(
+            injected,
+            [
+                ("abcd".to_owned(), false),
+                ("INJ".to_owned(), true),
+                ("AQID".to_owned(), true)
+            ]
+        );
+        assert_eq!(
+            live.inject(
+                7,
+                S2C,
+                Injection {
+                    kind: Kind::Ping,
+                    payload: Vec::new()
+                }
+            ),
+            Err(InjectError::Invalid)
+        );
+        drop((client, server));
+        pump.await.expect("pump ends");
+        assert!(!live.is_open(7));
+        let late = Injection {
+            kind: Kind::Text,
+            payload: b"x".to_vec(),
+        };
+        assert_eq!(live.inject(7, S2C, late), Err(InjectError::Closed));
+    }
+
+    #[test]
+    fn encoded_frames_parse_back_at_every_length_form() {
+        for (len, direction) in [
+            (0, S2C),
+            (125, C2S),
+            (126, S2C),
+            (65_535, C2S),
+            (65_536, S2C),
+        ] {
+            let payload: Vec<u8> = (0..len).map(|i: usize| i.to_le_bytes()[0]).collect();
+            let wire = encode_frame(direction, Kind::Binary, &payload);
+            let (out, parser) = parse_all(direction, &wire, len + 1);
+            assert_eq!(parser.failed(), None, "len {len}");
+            assert_eq!(out[0].kept, payload, "len {len}");
+        }
     }
 
     #[test]

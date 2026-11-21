@@ -182,6 +182,8 @@ pub(crate) struct State {
     passthrough: Passthrough,
     /// WebSocket capture limits.
     ws: WsLimits,
+    /// Open WebSocket connections that accept injected messages (shared with the store).
+    ws_live: ws::Live,
 }
 
 impl State {
@@ -260,6 +262,7 @@ impl Proxy {
             pairing: config.pairing,
             passthrough: config.passthrough,
             ws: config.ws,
+            ws_live: store.ws().live().clone(),
         };
         Ok(Self {
             listener,
@@ -753,7 +756,13 @@ where
                 record.flags.push(Flag::WsCompressed);
             }
             record.ws_messages = Some(0);
-            (state.bus.clone(), state.ws, extensions, record.id)
+            (
+                state.bus.clone(),
+                state.ws,
+                extensions,
+                record.id,
+                state.ws_live.clone(),
+            )
         });
         if let Some(client_upgrade) = client_upgrade {
             join_upgrades(client_upgrade, hyper::upgrade::on(&mut response), capture);
@@ -888,14 +897,14 @@ fn start_record<B>(
 fn join_upgrades(
     client: hyper::upgrade::OnUpgrade,
     server: hyper::upgrade::OnUpgrade,
-    capture: Option<(Bus, WsLimits, ws::Extensions, u64)>,
+    capture: Option<(Bus, WsLimits, ws::Extensions, u64, ws::Live)>,
 ) {
     tokio::spawn(async move {
         if let (Ok(client), Ok(server)) = tokio::join!(client, server) {
             let (mut client, mut server) = (TokioIo::new(client), TokioIo::new(server));
             match capture {
-                Some((bus, limits, extensions, id)) => {
-                    ws::pump(client, server, id, bus, limits, extensions).await;
+                Some((bus, limits, extensions, id, live)) => {
+                    ws::pump((client, server), id, bus, limits, extensions, &live).await;
                 }
                 None => {
                     let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
