@@ -7,11 +7,12 @@
 .ws-note { margin: 0; padding: 4px 6px; border-left: 3px solid var(--client-err); background: var(--warn-bg); }
 .ws-list { max-height: 45vh; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-2); }
 .ws-row {
-  display: grid; grid-template-columns: 6.5em 7em 4.5em 8em 1fr; gap: 8px;
+  display: grid; grid-template-columns: 6.5em 7em 11em 8em 1fr; gap: 8px;
   padding: 2px 6px; font-family: var(--mono); font-size: var(--fs-sm);
   cursor: pointer; border-bottom: 1px solid var(--line);
 }
 .ws-row:hover, .ws-row:focus { background: var(--row-hover); outline: none; }
+.ws-row:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
 .ws-row.selected { background: var(--sel); color: var(--sel-fg); box-shadow: inset 2px 0 0 var(--accent); }
 .ws-dir { font-weight: 600; }
 .ws-sent { color: var(--ok); }
@@ -27,7 +28,7 @@
 .ws-json-string { color: var(--syn-str); }
 .ws-json-number, .ws-json-boolean { color: var(--syn-num); }
 /* The composer that sends a message into a live connection; colours come from the tokens. */
-.ws-injected { font-size: 0.8em; opacity: 0.8; margin-left: 4px; }
+.ws-injected { white-space: nowrap; font-size: 0.8em; opacity: 0.8; margin-left: 4px; }
 .ws-composer { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
 .ws-composer textarea { flex: 1 1 260px; min-height: 2.6em; font: 0.9em var(--mono); padding: 3px 6px; }
 .ws-composer select, .ws-composer button { font: inherit; }

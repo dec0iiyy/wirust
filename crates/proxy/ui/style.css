@@ -611,6 +611,8 @@ img.preview {
 table.headers.edit td { padding: 2px 3px; border-bottom: 0; }
 table.headers.edit input { width: 100%; }
 table.headers.edit td:first-child { width: 36%; }
+/* In an editor the delete button is a control, not a hover extra: always visible. */
+table.headers.edit td.h-copy button { opacity: 1; }
 .body-input { width: 100%; min-height: 90px; resize: vertical; }
 .body-input:disabled { opacity: .55; }
 .pause-actions { display: flex; gap: var(--sp-3); margin: var(--sp-4) 0; flex-wrap: wrap; }

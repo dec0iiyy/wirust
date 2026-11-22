@@ -167,7 +167,8 @@ function tlsOf(f) {
 /** Normalises a stored flow (`{state, flow}`) or an SSE payload into a row model. */
 function model(state, f) {
   const m = { id: f.id, state, raw: f, search: null };
-  m.rules = (f.flags || []).filter((x) => x.startsWith("rule:")).map((x) => x.slice(5));
+  // A rule that fires in both phases (a breakpoint on request and response) is listed once.
+  m.rules = [...new Set((f.flags || []).filter((x) => x.startsWith("rule:")).map((x) => x.slice(5)))];
   m.time = clock(f.time);
   m.timeSort = f.time;
   const tls = tlsOf(f);
@@ -1145,11 +1146,14 @@ async function copy(text) {
     await navigator.clipboard.writeText(text);
     toast("Copied");
   } catch (_) {
+    const back = document.activeElement;
     const area = h("textarea", "visually-hidden", text);
     document.body.append(area);
     area.select();
     const ok = document.execCommand("copy");
     area.remove();
+    // select() moved focus to the helper; give it back to the button that was used.
+    if (back instanceof HTMLElement) back.focus();
     toast(ok ? "Copied" : "Copy failed");
   }
 }
