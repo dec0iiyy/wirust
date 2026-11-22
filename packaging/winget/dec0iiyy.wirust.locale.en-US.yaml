@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
 
 PackageIdentifier: dec0iiyy.wirust
-PackageVersion: 0.3.0
+PackageVersion: 0.4.0
 PackageLocale: en-US
 Publisher: dec0iiyy
 PublisherUrl: https://github.com/dec0iiyy
@@ -27,6 +27,6 @@ Tags:
 - mitm
 - proxy
 - tls
-ReleaseNotesUrl: https://github.com/dec0iiyy/wirust/releases/tag/v0.3.0
+ReleaseNotesUrl: https://github.com/dec0iiyy/wirust/releases/tag/v0.4.0
 ManifestType: defaultLocale
 ManifestVersion: 1.10.0
