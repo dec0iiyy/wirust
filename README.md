@@ -38,7 +38,8 @@ curl -fsSL https://github.com/dec0iiyy/wirust/releases/latest/download/install.s
 ```
 
 The script checks the download against `SHA256SUMS` (and its build attestation when `gh`
-is installed) and installs into `/usr/local/bin`, or `--prefix DIR`. Or download a binary
+is installed) and installs into `/usr/local/bin` (with `sudo` when that directory is not
+writable, or `$HOME/.local/bin` when there is no `sudo`), or `--prefix DIR`. Or download a binary
 from [Releases](https://github.com/dec0iiyy/wirust/releases): `wirust-linux-x86_64`,
 `wirust-linux-aarch64`, `wirust-macos-arm64`, `wirust-macos-x86_64`,
 `wirust-windows-x86_64.exe`. From source: `cargo build --release` (Rust 1.88+, a C compiler).
@@ -84,11 +85,12 @@ Browsers: run `wirust --system-proxy` to point the system proxy (macOS, Windows,
 wirust while it runs and restore the old settings on exit, or set the HTTP and HTTPS proxy to
 `127.0.0.1:8080` by hand. See [docs/desktop.md](docs/desktop.md).
 
-Without `--ui`, it prints one line per exchange (`--json` for JSON Lines):
+In the terminal it prints one line per exchange, with or without `--ui` (`--json` for JSON
+Lines):
 
 ```
 13:31:06 GET    https://example.com/  200  OK  h2  289 ms  577 B  curl 8.7.1 (ja4 t13d4907h2_0d8feac7bc37_7395dae3b2f3)
-13:31:07 TLS-FAIL example.com via example.com:443  received fatal alert: UnknownCA  (ja4 t13d4907h2_...)  hint: the client does not trust the CA or pins certificates
+13:31:07 TLS-FAIL example.com via example.com:443  received fatal alert: UnknownCA  (ja4 t13d4907h2_..., curl 8.7.1)  hint: the client does not trust the CA or pins certificates; to relay it undecrypted: --passthrough example.com
 ```
 
 When a client keeps rejecting the CA, only its first `TLS-FAIL` per host and error is printed
@@ -143,15 +145,15 @@ official pages do not say.
 
 | | wirust | Proxyman | Charles | mitmproxy |
 |---|---|---|---|---|
-| Price, licence | free, GPL-3.0-only | paid (free trial), closed source | paid (30-day trial), closed source | free, MIT |
+| Price, licence | free, GPL-3.0-only | paid (free trial), closed source | paid (30-day trial), closed source | free, open source |
 | Interface | web UI and CLI | native macOS app; Windows and Linux apps | desktop app (Windows, macOS, Linux) | terminal UI, CLI, web UI |
 | Rules, map local and remote | yes | yes (paid tiers) | yes | yes |
 | Breakpoints | yes | yes (paid tiers) | yes | yes |
 | WebSocket | yes (HTTP/1.1) | yes | yes | yes |
 | Scripting | yes (Rhai, sandboxed) | JavaScript | | Python |
-| gRPC, protobuf views | yes (schema-less, or with `.proto` files) | protobuf | protobuf | yes |
+| gRPC, protobuf views | yes (schema-less, or with `.proto` files) | yes (paid tiers) | protobuf viewer | yes |
 | HTTP/3 | no | | | yes |
-| Sets the system proxy | yes (macOS; Windows and GNOME written but untested) | yes (macOS) | yes (macOS, Windows) | no (local capture mode instead) |
+| Sets the system proxy | yes (macOS, Windows, GNOME; not yet tried on a real system) | | | |
 | Client JA4, JA3 | yes | | | |
 
 Not in wirust yet: a native app, HTTP/3. See
@@ -200,14 +202,17 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 | `--upstream-bypass LIST` | | hosts, `*.domains`, IPs and CIDRs that skip the upstream proxy (repeatable) |
 | `--android-cleanup` | | on exit, clear the adb device's proxy |
 
-Commands: `connect`, `android setup|reset`, `ca path|show|install-help`, `export --har`,
-`import --har`, `view --session`, `replay --session --id N`. `wirust --help` lists every
+Commands: `connect`, `android setup|reset`, `ca path|show|install-help`,
+`ca install|uninstall|status`, `system-proxy on|off|status`, `export --har`, `import --har`,
+`view --session`, `replay --session --id N`, and the experimental `wireguard` (only in builds
+with the `wireguard` feature). `wirust --help` lists every
 option; `wirust COMMAND --help` (such as `wirust ca --help`) shows one command's options.
 
 ## Documentation
 
-[docs/README.md](docs/README.md) lists every document: the UI, rules, HAR and search, replay,
-passthrough, WebSocket, gRPC, phones, architecture, design, roadmap and releasing.
+[docs/README.md](docs/README.md) lists every document: install, desktop setup, the UI, rules,
+scripting, HAR and search, replay, passthrough, upstream proxies, WebSocket, gRPC, phones,
+WireGuard capture, architecture, design, roadmap and releasing.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers building, testing and where code goes.
 
 ## Status

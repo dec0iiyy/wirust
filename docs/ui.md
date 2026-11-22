@@ -126,7 +126,8 @@ with `codegen.css` for the "Copy as" menu), embedded in the binary and listed in
 - `app.js` exposes `hooks.pause` (SSE events whose name starts with `pause`), `hooks.load`
   (after each load of the store) and `hooks.detail` (the shown flow) for `panels.js`.
 - **Toolbar**: the top row has the name, the buttons grouped by meaning (capture: Follow,
-  Clear; share: Export HAR, Connect; control: Breakpoints, Rules), the connection badge and
+  Clear; share: Export HAR, Connect; control: Breakpoints, Rules, and Scripts when the proxy
+  runs with `--script`), the connection badge and
   the theme button; the row below has the filter box (`/` focuses it), the quick filters and
   the flow count. Below 1180 px the share and control buttons show only their icons (the
   name stays in the tooltip and the accessible label), below 980 px the capture buttons
