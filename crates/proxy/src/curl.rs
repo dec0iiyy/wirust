@@ -6,7 +6,15 @@
 
 use std::fmt::Write as _;
 
+use base64::Engine as _;
+
 use crate::flow::Exchange;
+
+/// Whether `text` holds a control character other than newline, carriage return or tab.
+fn has_control_char(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+}
 
 /// Request headers cURL must not repeat: hop-by-hop headers and those it computes itself.
 pub(crate) const SKIPPED: &[&str] = &[
@@ -97,6 +105,13 @@ fn plan(x: &Exchange) -> Plan {
         args.push("--data-binary".to_owned());
         if body.encoding == "base64" {
             input = Some(Input::Base64(body.data.clone()));
+            args.push("@-".to_owned());
+        } else if has_control_char(&body.data) {
+            // A NUL or another control character cannot sit in a shell argument; a gRPC
+            // frame, for one, starts with NUL bytes and is still valid UTF-8.
+            input = Some(Input::Base64(
+                base64::engine::general_purpose::STANDARD.encode(body.data.as_bytes()),
+            ));
             args.push("@-".to_owned());
         } else if body.data.starts_with('@') {
             input = Some(Input::Text(body.data.clone()));
@@ -281,6 +296,28 @@ mod tests {
         let (stdin, args) = run(&super::plan(&x));
         assert_eq!(stdin, b"@/etc/passwd 'x'");
         assert_eq!(args[1..3], ["--data-binary", "@-"]);
+    }
+
+    #[test]
+    fn text_with_a_nul_or_control_byte_goes_through_stdin() {
+        // A gRPC frame: NUL flag and length bytes are valid UTF-8 but cannot be an argument.
+        let mut x = exchange(4, "POST", "http://a.test/svc/Method", 200);
+        x.request_headers.clear();
+        x.request_body = BodyRecord {
+            size: 10,
+            truncated: false,
+            encoding: "utf8",
+            data: "\0\0\0\0\u{5}hello".to_owned(),
+            content_encoding: None,
+        };
+        let (stdin, args) = run(&plan(&x));
+        assert_eq!(stdin, b"\0\0\0\0\x05hello");
+        assert!(args.windows(2).any(|w| w == ["--data-binary", "@-"]));
+        // Newlines, carriage returns and tabs are fine as an argument.
+        x.request_body.data = "a\tb\r\nc".to_owned();
+        let (stdin, args) = run(&plan(&x));
+        assert!(stdin.is_empty());
+        assert!(args.contains(&"a\tb\r\nc".to_owned()));
     }
 
     #[test]
