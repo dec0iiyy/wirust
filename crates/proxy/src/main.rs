@@ -74,6 +74,8 @@ enum Command {
         config_dir: Option<PathBuf>,
         mobile: MobileArgs,
     },
+    /// `mcp [--api URL] [--token T | --token-file F] [--allow-write] [--no-redact]`
+    Mcp(wirust::mcp::Options),
     /// `--help`, with the command words given before or after it (none: the main help).
     Help(Vec<String>),
     Version,
@@ -108,6 +110,9 @@ struct RunArgs {
     upstream_bypass: Bypass,
     system_proxy: SystemProxyFlag,
     confirm: Confirm,
+    /// `--token-file`: where a run with `--ui` writes the UI link (mode 0600), and where
+    /// `mcp` reads it.
+    token_file: Option<PathBuf>,
     /// `wireguard`: the UDP address of the WireGuard capture mode (experimental).
     #[cfg(feature = "wireguard")]
     wireguard: Option<SocketAddr>,
@@ -142,6 +147,79 @@ enum SystemProxyFlag {
 enum Confirm {
     Ask,
     Assumed,
+}
+
+/// Flags of `mcp` (`--token-file` and `--allow-remote` live in [`RunArgs`]).
+#[derive(Debug)]
+struct McpFlags {
+    api: Option<String>,
+    token: Option<String>,
+    write: wirust::mcp::WriteAccess,
+    redaction: wirust::mcp::Redaction,
+    max_output: usize,
+}
+
+impl Default for McpFlags {
+    fn default() -> Self {
+        Self {
+            api: None,
+            token: None,
+            write: wirust::mcp::WriteAccess::ReadOnly,
+            redaction: wirust::mcp::Redaction::On,
+            max_output: wirust::mcp::DEFAULT_MAX_OUTPUT,
+        }
+    }
+}
+
+/// The options of `mcp`: `--api` or `WIRUST_API` or the link in `--token-file`; `--token` or
+/// the token file or `WIRUST_TOKEN` (or the `#token=` of the link).
+fn mcp_options(
+    flags: McpFlags,
+    token_file: Option<&std::path::Path>,
+    allow_remote: bool,
+) -> anyhow::Result<wirust::mcp::Options> {
+    let file = token_file
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map(|text| text.trim().to_owned())
+                .with_context(|| format!("reading --token-file {}", path.display()))
+        })
+        .transpose()?;
+    let (file_link, file_token) = match file {
+        Some(text) if text.starts_with("http://") => (Some(text), None),
+        Some(text) => (None, Some(text)),
+        None => (None, None),
+    };
+    let api = flags
+        .api
+        .or_else(|| std::env::var("WIRUST_API").ok())
+        .or_else(|| file_link.clone())
+        .context("mcp needs --api URL (or WIRUST_API, or --token-file with the UI link)")?;
+    // A token-file link names the token of its own address only.
+    let link_token = file_link
+        .filter(|link| link.split('#').next() == Some(api.split('#').next().unwrap_or("")))
+        .and_then(|link| link.split_once("#token=").map(|(_, t)| t.to_owned()));
+    let token = flags
+        .token
+        .or(file_token)
+        .or(link_token)
+        .or_else(|| std::env::var("WIRUST_TOKEN").ok());
+    anyhow::ensure!(
+        flags.max_output >= 1024,
+        "--max-output must be at least 1024 bytes"
+    );
+    Ok(wirust::mcp::Options {
+        api,
+        token,
+        remote: if allow_remote {
+            wirust::mcp::Remote::Allowed
+        } else {
+            wirust::mcp::Remote::LoopbackOnly
+        },
+        write: flags.write,
+        redaction: flags.redaction,
+        max_output: flags.max_output,
+    })
 }
 
 /// Flags of `replay`.
@@ -195,7 +273,7 @@ Usage:
          [--proto PATH]... [--proto-include DIR]... [--proto-message TYPE]
          [--passthrough PATTERN]... [--decrypt-only PATTERN]...
          [--ws-body-limit BYTES] [--ws-max-messages N] [--ws-log]
-         [--ws-strip-compression]
+         [--ws-strip-compression] [--token-file FILE]
          [--android-cleanup [--serial S]]
   {NAME} connect [--port P] [--lan-ip IP] [--allow-client IP|CIDR]... [run options]
   {NAME} android setup|reset [--serial S] [--port P] [--config-dir DIR]
@@ -207,6 +285,8 @@ Usage:
   {NAME} view --session FILE [--filter QUERY]
   {NAME} replay --session FILE --id N [--set-header 'N: V']... [--method M] [--url U]
          [--via http://127.0.0.1:8080] [--config-dir DIR]
+  {NAME} mcp [--api URL] [--token TOKEN | --token-file FILE] [--allow-write] [--no-redact]
+         [--max-output BYTES] [--allow-remote]
   {NAME} wireguard [--listen UDP_ADDR] [--allow-remote] [run options]       (experimental)
   {NAME} wireguard add-peer NAME [--lan-ip IP] [--port P] [--config-dir DIR] (experimental)
   {NAME} COMMAND --help      the options of one command
@@ -226,7 +306,9 @@ Commands:
                         `status` shows them
   replay                send flow N of a session file again through a running proxy (--via),
                         as an ordinary client, and print the status line; see docs/replay.md
-  wireguard             experimental, only in builds with the cargo feature `wireguard`:
+  mcp                   a Model Context Protocol server on stdio that lets AI agents inspect
+                        the flows of a running `{NAME} --ui`; see docs/mcp.md
+  wireguard            experimental, only in builds with the cargo feature `wireguard`:
                         capture a phone's TCP traffic through the official WireGuard app
                         (docs/wireguard.md); `add-peer` prints a client config and QR code
 
@@ -284,13 +366,22 @@ Options:
   --ws-log              print one line per WebSocket message (see docs/websocket.md)
   --ws-strip-compression  remove the client's WebSocket extension offer, so peers whose
                         permessage-deflate misbehaves send plain frames
+  --token-file FILE     with --ui: write the UI link, which holds the token, to FILE (mode
+                        0600); mcp: read the control-plane address and token from it
+  --api URL             mcp: the control plane, such as http://127.0.0.1:9000 (or WIRUST_API)
+  --token TOKEN         mcp: the control-plane token (or WIRUST_TOKEN; the process list shows
+                        arguments, so prefer the variable or --token-file)
+  --allow-write         mcp: offer the write tools (replay, compose, rule changes)
+  --no-redact           mcp: pass captured secrets (tokens, cookies) to the agent unredacted
+  --max-output BYTES    mcp: cap on the text of one tool result (default {mcp_max})
 
 Requests to http://{MAGIC_HOST}/ through the proxy get a page with the CA download.
 ",
         version = env!("CARGO_PKG_VERSION"),
         pause = DEFAULT_PAUSE_TIMEOUT.as_secs(),
         ws_body = DEFAULT_WS_BODY_LIMIT,
-        ws_max = DEFAULT_WS_MAX_MESSAGES
+        ws_max = DEFAULT_WS_MAX_MESSAGES,
+        mcp_max = wirust::mcp::DEFAULT_MAX_OUTPUT
     )
 }
 
@@ -546,6 +637,33 @@ Options:
   --config-dir DIR      where the CA is kept (default: the platform config dir)
 "
         ),
+        ["mcp"] => format!(
+            "{NAME} mcp: let AI agents inspect captured traffic over MCP
+
+Usage:
+  {NAME} mcp [--api URL] [--token TOKEN | --token-file FILE] [--allow-write] [--no-redact]
+         [--max-output BYTES] [--allow-remote]
+
+A Model Context Protocol server on stdin and stdout for AI coding agents. It talks to the
+control plane of a running `{NAME} --ui ADDR`, which it checks at start. Captured traffic
+reaches the agent framed as untrusted data, with secrets redacted. It never writes files
+and never runs programs. See docs/mcp.md.
+
+Options:
+  --api URL             the control plane, such as http://127.0.0.1:9000, or the whole UI
+                        link (default: WIRUST_API, or the link in --token-file)
+  --token TOKEN         the control-plane token (default: WIRUST_TOKEN); the process list
+                        shows arguments, so prefer the variable or --token-file
+  --token-file FILE     read the UI link (or a bare token) that `{NAME} --ui ADDR
+                        --token-file FILE` wrote
+  --allow-write         offer the write tools: replay_flow, compose_request, create_rule,
+                        set_rule_enabled (off by default)
+  --no-redact           pass captured secrets to the agent unredacted
+  --max-output BYTES    cap on the text of one tool result (default {max})
+  --allow-remote        accept a control plane that is not on loopback
+",
+            max = wirust::mcp::DEFAULT_MAX_OUTPUT
+        ),
         ["wireguard"] => format!(
             "{NAME} wireguard: capture a phone's traffic through the WireGuard app (experimental)
 
@@ -623,10 +741,12 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         upstream_bypass: Bypass::default(),
         system_proxy: SystemProxyFlag::Off,
         confirm: Confirm::Ask,
+        token_file: None,
         #[cfg(feature = "wireguard")]
         wireguard: None,
     };
     let mut mobile = MobileArgs::default();
+    let mut mcp = McpFlags::default();
     let mut words = Vec::new();
     let mut help = false;
     let mut listen_given = false;
@@ -739,6 +859,16 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             "--ws-strip-compression" => run.ws.strip_compression = true,
             "--system-proxy" => run.system_proxy = SystemProxyFlag::On,
             "--yes" => run.confirm = Confirm::Assumed,
+            "--token-file" => run.token_file = Some(PathBuf::from(value(arg)?)),
+            "--api" => mcp.api = Some(value(arg)?),
+            "--token" => mcp.token = Some(value(arg)?),
+            "--allow-write" => mcp.write = wirust::mcp::WriteAccess::Allowed,
+            "--no-redact" => mcp.redaction = wirust::mcp::Redaction::Off,
+            "--max-output" => {
+                mcp.max_output = value(arg)?
+                    .parse()
+                    .context("--max-output takes a byte count")?;
+            }
             flag if flag.starts_with('-') => bail!("unknown option {flag}; see --help"),
             word => words.push(word.to_owned()),
         }
@@ -784,6 +914,11 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             har: run.har.context("import needs --har IN.har")?,
             session: run.session.context("import needs --session OUT.jsonl")?,
         }),
+        ["mcp"] => Ok(Command::Mcp(mcp_options(
+            mcp,
+            run.token_file.as_deref(),
+            run.allow_remote,
+        )?)),
         ["view"] => Ok(Command::View {
             session: run.session.context("view needs --session FILE")?,
             filter: run.filter,
@@ -851,6 +986,25 @@ fn system_proxy_target(
          that is intended"
     );
     Ok(addr)
+}
+
+/// Writes `text` to `path`, readable by the owner only (mode 0600 on Unix), replacing it.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        // An existing file keeps its mode on open; narrow it as well.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file
+    };
+    #[cfg(not(unix))]
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 fn install_help(path: &std::path::Path) -> String {
@@ -956,6 +1110,9 @@ fn execute(command: Command) -> anyhow::Result<()> {
             config_dir: dir,
             args,
         } => replay(&session, &config_dir(dir)?, args)?,
+        Command::Mcp(options) => tokio::runtime::Runtime::new()
+            .context("starting the async runtime")?
+            .block_on(wirust::mcp::run(options))?,
         #[cfg(feature = "wireguard")]
         Command::WireguardAddPeer {
             name,
@@ -1343,6 +1500,11 @@ fn run(
             proxy.ca().path().display()
         );
         if let Some(control) = &control {
+            // Written before the link is printed, so whoever waits for that line finds it.
+            if let Some(path) = &args.token_file {
+                write_private(path, &format!("{}\n", control.url()))
+                    .with_context(|| format!("writing --token-file {}", path.display()))?;
+            }
             eprintln!("{NAME} UI (keep this link private): {}", control.url());
             control.set_session_file(args.session.clone());
         }

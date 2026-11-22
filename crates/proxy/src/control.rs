@@ -469,6 +469,8 @@ struct Info<'a> {
     rules_file: Option<String>,
     session_file: Option<String>,
     listen_is_loopback: bool,
+    /// Flows the store holds now.
+    flows: usize,
 }
 
 /// SHA-256 of `der` as colon-separated upper-case hex, the form certificate viewers show.
@@ -494,6 +496,7 @@ impl State {
                 .map(|file| file_name(&file)),
             session_file: self.session_file.get().map(|file| file_name(file)),
             listen_is_loopback: self.proxy_addr.ip().is_loopback(),
+            flows: self.store.len(),
         }
     }
 
