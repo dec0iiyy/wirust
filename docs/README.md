@@ -1,6 +1,7 @@
 # Documentation
 
 - [install.md](install.md): installing on Linux, macOS and Windows (Scoop), the unsigned Windows binary, verifying a download.
+- [options.md](options.md): every option and command, grouped, and what the terminal prints.
 - [ui.md](ui.md): the web UI, its keys, search and the URL fragment options.
 - [rules.md](rules.md): TOML rules (block, map local and remote, rewrite, delay, throttle, breakpoints) and their API.
 - [scripting.md](scripting.md): `--script` Rhai hooks, their API, the sandbox limits and the order with rules.
