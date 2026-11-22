@@ -161,13 +161,24 @@ document.addEventListener("DOMContentLoaded", () => {
     d.headers.forEach((row, index) => {
       const name = input(row.name, (v) => { row.name = v; }, "h-name-input", "Header name");
       const value = input(row.value, (v) => { row.value = v; }, "h-value-input", "Value of " + row.name);
-      const del = button("×", "mini", () => { d.headers.splice(index, 1); render(); });
+      const del = button("×", "mini", () => {
+        d.headers.splice(index, 1);
+        render();
+        // The rows were rebuilt: keep focus on the next delete button, or on "Add header".
+        const dels = dialog.querySelectorAll("table.headers button.mini");
+        (dels[Math.min(index, dels.length - 1)] || dialog.querySelector(".body-bar .mini")).focus();
+      });
       del.setAttribute("aria-label", "Delete header " + row.name);
       tbody.append(h("tr", null, null, [h("td", null, null, [name]), h("td", null, null, [value]), h("td", null, null, [del])]));
     });
     dialog.append(h("table", "headers edit", null, [tbody]));
     dialog.append(h("div", "body-bar", null, [
-      button("Add header", "mini", () => { d.headers.push({ name: "", value: "" }); render(); }),
+      button("Add header", "mini", () => {
+        d.headers.push({ name: "", value: "" });
+        render();
+        const names = dialog.querySelectorAll(".h-name-input");
+        names[names.length - 1].focus();
+      }),
     ]));
 
     dialog.append(h("h3", null, "Body"));
@@ -264,7 +275,11 @@ document.addEventListener("DOMContentLoaded", () => {
       d.error = e.message;
     }
     d.busy = false;
-    if (draft === d && dialog.open) render();
+    if (draft === d && dialog.open) {
+      render();
+      // render() rebuilt the dialog, so focus went with the old Send button; put it back.
+      dialog.querySelector(".pause-actions .primary").focus();
+    }
   }
 
   // Links: #panel=compose opens New request; #panel=edit-replay&flow=N opens Edit & replay.

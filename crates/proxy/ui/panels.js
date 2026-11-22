@@ -34,6 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
     box.hidden = true;
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-label", label);
+    box.tabIndex = -1; // focused on open, so Tab goes on inside it
     anchor.setAttribute("aria-controls", id);
     anchor.setAttribute("aria-expanded", "false");
     document.body.append(box);
@@ -50,9 +51,12 @@ document.addEventListener("DOMContentLoaded", () => {
     box.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - box.offsetWidth - 8))) + "px";
     anchor.setAttribute("aria-expanded", "true");
     openPopover = { anchor, box };
+    box.focus();
   }
-  function closePopover() {
+  function closePopover(refocus) {
     if (!openPopover) return;
+    // Focus inside the box would be lost when it hides: give it back to the button.
+    if (refocus || openPopover.box.contains(document.activeElement)) openPopover.anchor.focus();
     openPopover.box.hidden = true;
     openPopover.anchor.setAttribute("aria-expanded", "false");
     openPopover = null;
@@ -61,7 +65,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (openPopover && !openPopover.box.contains(e.target) && !openPopover.anchor.contains(e.target)) closePopover();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && openPopover) { closePopover(); e.stopPropagation(); }
+    if (e.key === "Escape" && openPopover) { closePopover(true); e.stopPropagation(); }
   }, true);
 
   // -------------------------------------------------------------------------
@@ -255,6 +259,7 @@ document.addEventListener("DOMContentLoaded", () => {
   closeSide.setAttribute("aria-label", "Close the side panel");
   for (const [b, name] of [[pauseTab, "pauses"], [rulesTab, "rules"]]) {
     b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", "false");
     b.dataset.side = name;
   }
   sideTabs.append(pauseTab, rulesTab, closeSide);
@@ -584,12 +589,23 @@ document.addEventListener("DOMContentLoaded", () => {
       name.setAttribute("aria-label", "Header name");
       const value = input(row.value, (v) => { row.value = v; }, "h-value-input");
       value.setAttribute("aria-label", "Value of " + row.name);
-      const del = button("×", "mini", () => { d.headers.splice(index, 1); renderPauses(); });
+      const del = button("×", "mini", () => {
+        d.headers.splice(index, 1);
+        renderPauses();
+        // The rows were rebuilt: keep focus on the next delete button, or on "Add header".
+        const dels = slot.querySelectorAll(".pause-editor table.headers button.mini");
+        (dels[Math.min(index, dels.length - 1)] || slot.querySelector(".pause-editor .body-bar .mini")).focus();
+      });
       del.setAttribute("aria-label", "Delete header " + row.name);
       tbody.append(h("tr", null, null, [h("td", null, null, [name]), h("td", null, null, [value]), h("td", "h-copy", null, [del])]));
     });
     table.append(tbody);
-    const add = button("Add header", "mini", () => { d.headers.push({ name: "", value: "" }); renderPauses(); });
+    const add = button("Add header", "mini", () => {
+      d.headers.push({ name: "", value: "" });
+      renderPauses();
+      const names = slot.querySelectorAll(".pause-editor .h-name-input");
+      names[names.length - 1].focus();
+    });
     const parts = [table, h("div", "body-bar", null, [add])];
     if (phase === "response" && d.detail !== "ok") {
       const removed = input(d.removed.join(", "), (v) => { d.removed = v.split(",").map((s) => s.trim()).filter(Boolean); }, "remove-input");
