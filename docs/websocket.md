@@ -48,7 +48,6 @@ The parser reads hostile input for as long as a connection lives, so everything 
 | Frame header | 14 bytes | - | the parser buffers at most one header |
 | Control frame payload | 125 bytes, FIN set | - | protocol violation otherwise |
 | 64-bit length | top bit clear | - | protocol violation otherwise |
-
 | Decompressed bytes per message | the body limit, and 1000 per wire byte (at least 64 KiB) | `--ws-body-limit` | over the ratio: `decode_failed`, raw bytes kept |
 
 Protocol violations (reserved bits without a negotiated extension, RSV2 or RSV3 with

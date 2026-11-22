@@ -197,8 +197,9 @@ engine is built without them). Each hook call runs under these limits:
 A script that fails (a runtime error, an exceeded limit, an invalid header or status) fails
 open: its changes for that call are dropped, the exchange goes on as if the script were not
 there, its `on_response` is skipped for that exchange, and the flow gets the `script_error`
-flag. The error is written to stderr and the script log once per distinct message, with the
-file name (never the directory), and shown as the last error in `GET /api/v1/script`.
+flag. The error is written to stderr and the script log once per distinct message (up to
+1000 distinct messages per file; later new ones are not logged), with the file name (never
+the directory), and always shown as the last error in `GET /api/v1/script`.
 
 ## Observability
 

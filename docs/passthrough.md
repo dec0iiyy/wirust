@@ -41,9 +41,10 @@ Each passthrough tunnel ends with a `tunnel` record:
 ```json
 {"schema_version":1,"type":"tunnel","id":7,"time":"...","client":"127.0.0.1:53211",
  "target":"www.bank.example:443","bytes_up":1834,"bytes_down":5120,"error":null,
- "reason":"passthrough","duration_ms":812.4,
+ "reason":"passthrough",
  "tls":{"sni":"www.bank.example","alpn_offered":["h2","http/1.1"],
-        "ja4":"t13d1516h2_8daaf6152771_02713d6af862","ja3_hash":"...","known_client":"Chrome 131"}}
+        "ja4":"t13d1516h2_8daaf6152771_02713d6af862","ja3_hash":"...","known_client":"Chrome 131"},
+ "duration_ms":812.4}
 ```
 
 The ClientHello is read before the decision, so the client's SNI, offered ALPN, JA4, JA3 and
