@@ -316,7 +316,7 @@ mod tests {
         // Newlines, carriage returns and tabs are fine as an argument.
         x.request_body.data = "a\tb\r\nc".to_owned();
         let (stdin, args) = run(&plan(&x));
-        assert!(stdin.is_empty());
+        assert_eq!(stdin, Vec::<u8>::new());
         assert!(args.contains(&"a\tb\r\nc".to_owned()));
     }
 
