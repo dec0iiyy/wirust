@@ -255,3 +255,30 @@ Keep it that way:
 `crates/proxy/tests/ui.rs` enforces this: it fetches every file in `ui/` with the token,
 checks its content type, that the served copy matches the file, the CSP directives, and
 that no file contains the forbidden text above or an `http(s)://` URL.
+
+## Browser end-to-end check
+
+`scripts/ui-e2e.mjs` clicks through the page in a real headless Chrome over the DevTools
+protocol (Node 22 or newer, no packages) and prints one `PASS` or `FAIL` line per check:
+replay and its editor, breakpoints, WebSocket messages, copy menus, theme, the live list,
+keys, search, bodies, rules, scripts, gRPC, popovers, layout at 1400, 1000 and 760 px and
+keyboard focus, and it fails on any console error or warning. It starts nothing and
+skips with a message when Chrome is not reachable. By hand, in separate terminals:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj /CN=localhost
+node scripts/ui-e2e-fixtures.mjs 47311 47312 cert.pem key.pem
+wirust --listen 127.0.0.1:47313 --ui 127.0.0.1:47314 --upstream-insecure \
+  --rules rules.toml --script script.rhai --proto demo.proto --config-dir ./cfg
+"Google Chrome" --headless=new --remote-debugging-port=47315 --user-data-dir=./chrome
+node scripts/ui-e2e.mjs 'UI_LINK_WITH_TOKEN' 47315 47313 \
+  --target 'http://127.0.0.1:47311' --shots ./shots [--only 5,6,9]
+```
+
+`rules.toml` needs a rule with `match = { path = "/bp*" }` and
+`action = { type = "breakpoint", request = true, response = true }`; `script.rhai` should
+`throw` on the path `/throw` and `print` on `/log`; `demo.proto` declares
+`demo.Greeter/SayHello` returning `HelloReply { string message = 1; int32 count = 2; }`.
+The gRPC and Client TLS checks need one HTTPS and one gRPC request sent with
+`curl --cacert` through the proxy first (`--http2 -H 'content-type: application/grpc'` to
+`https://localhost:47312/demo.Greeter/SayHello`).
