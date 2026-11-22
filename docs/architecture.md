@@ -10,6 +10,8 @@ built in parallel without editing the same functions.
 |---|---|
 | `lib.rs` | `NAME`, `MAGIC_HOST`, `DEFAULT_BODY_LIMIT`, module list |
 | `main.rs` | flags, start-up banner, the log printer (`print_flows`) |
+| `logfold.rs` | `Folder`: folds repeated `TLS-FAIL` console lines for the same host and error into one summary line (console only) |
+| `clock.rs` | UTC wall-clock formatting for record timestamps, without a date-time dependency |
 | `proxy.rs` | `Config`, `Proxy`: listener, CONNECT, TLS interception, forwarding, running the chain |
 | `hello.rs` | reads and replays the raw ClientHello (`peek`, `Prefixed`) |
 | `ca.rs`, `certs.rs` | the local CA, per-host leaf certificates and their cache |
@@ -36,7 +38,7 @@ built in parallel without editing the same functions.
 | `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `permessage-deflate` inflation of the recorded copy, `GET` and `POST /api/v1/flows/{id}/messages` (`ws::Live` holds the open connections that accept injected messages); `docs/websocket.md` |
 | `grpc.rs`, `protobuf.rs`, `schema.rs`, `grpc_api.rs` | gRPC, gRPC-Web and protobuf decoding of recorded bodies: framing, inflating, status from `response_trailers`, the schema-less decoder, `.proto` schemas compiled with `protox` and decoded with `prost-reflect`, `GET /api/v1/flows/{id}/grpc` and `GET /api/v1/proto`; `docs/grpc.md` |
 | `wireguard.rs`, `wireguard/` | experimental, cargo feature `wireguard` only: keys and peers (`config.rs`), the UDP listener with boringtun sessions, a smoltcp stack and the DNS relay (`server.rs`); terminated connections go to `serve_transparent` in `proxy.rs`; `docs/wireguard.md` |
-| `ui/` | static files embedded with `include_bytes!` (`index.html`, `panels.js`, `app.js`, `style.css`, `ws.js` and `ws.css` for the Messages tab, `grpc.js` and `grpc.css` for the gRPC tab) |
+| `ui/` | static files embedded with `include_bytes!` (`index.html`, `theme.js`, `panels.js`, `app.js`, `style.css`, `ws.js` and `ws.css` for the Messages tab, `grpc.js` and `grpc.css` for the gRPC tab, `replay.js` and `replay.css` for replay and compose, `script.js` for the Scripts panel, `codegen.js` and `codegen.css` for the code export) |
 
 ## One exchange
 
@@ -82,9 +84,9 @@ empty, so ordinary traffic logs exactly the fields it did before.
 | Check | Code | Test (`tests/control.rs`) |
 |---|---|---|
 | 128-bit token from the OS RNG, printed once as `http://ADDR/#token=...`; API needs `Authorization: Bearer` or the `token` cookie, compared in constant time; never the query string | `new_token`, `State::authorized`, `same_secret` | `the_api_needs_the_token_in_a_header_or_cookie_never_the_query` |
-| `Host` must be the listener's address (or `localhost:PORT` on loopback): DNS rebinding; `Origin`, when present, must be `http://` plus that host; no `Access-Control-*` headers | `State::host_ok`, `route` | `a_wrong_host_or_origin_is_refused` |
-| Loopback only unless `--allow-remote` | `check_listen` | `binding_beyond_loopback_needs_allow_remote` |
-| State changes are POST only | `route` | `state_changes_are_post_only_and_responses_are_hardened` |
+| `Host` must be the listener's address (or `localhost:PORT` on loopback, or any IP literal with the listener's port when bound to an unspecified address with `--allow-remote`): DNS rebinding; `Origin`, when present, must be `http://` plus that host; no `Access-Control-*` headers | `State::host_ok`, `route` | `a_wrong_host_or_origin_is_refused` |
+| Loopback only unless `--allow-remote` (`wirust connect` sets it for its LAN listener, and the `--ui` address inherits it) | `check_listen` | `binding_beyond_loopback_needs_allow_remote` |
+| State changes are POST (or PUT for `/api/v1/rules` and `/api/v1/passthrough`); GET never changes state | `route`, `module_routes` | `state_changes_are_post_only_and_responses_are_hardened` |
 | `no-store`, `nosniff`, `no-referrer`, `X-Frame-Options: DENY`, strict CSP (no inline script) | `handle` | same |
 | The proxy refuses targets on the control plane's port at any loopback/unspecified IP or `localhost` | `Proxy::refuse_target`, `State::refuses` | `the_proxy_refuses_to_reach_the_control_plane` |
 
@@ -96,7 +98,8 @@ empty, so ordinary traffic logs exactly the fields it did before.
   `EventSource` cannot send headers, or set the `token` cookie). Keep the CSP: no inline
   scripts or styles.
 - **New API routes**: put them in the feature's own `*_api.rs` and call it from
-  `control::module_routes`, like `ws_api`, `har_api`, `rules_api` and `replay_api`. Each
+  `control::module_routes`, like `ws_api`, `har_api`, `grpc_api`, `rules_api`, `script_api`
+  and `replay_api`. Each
   module answers only the paths it owns, after `route` has checked `Host`, `Origin` and the
   token.
 - **Interceptors**: implement `intercept::Interceptor` and push it onto
