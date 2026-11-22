@@ -17,7 +17,7 @@ it relays without decrypting. That tells you which TLS stack an app really uses,
 User-Agent says. It is free software (GPL-3.0-only), one binary, no account, no
 telemetry.
 
-Status: 0.3.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
+Status: 0.4.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
 
 ![The flow list with the Client TLS tab of a request and a paused breakpoint](docs/img/flows-client-tls.png)
 
@@ -154,7 +154,7 @@ official pages do not say.
 | Scripting | yes (Rhai, sandboxed) | JavaScript | | Python |
 | gRPC, protobuf views | yes (schema-less, or with `.proto` files) | yes (paid tiers) | protobuf viewer | yes |
 | HTTP/3 | no | | | yes |
-| Sets the system proxy | yes (macOS, Windows, GNOME; not yet tried on a real system) | | | |
+| Sets the system proxy | yes (macOS, tried by hand; Windows and GNOME not yet tried on a real system) | | | |
 | Client JA4, JA3 | yes | | | |
 
 Not in wirust yet: a native app, HTTP/3. See
@@ -205,32 +205,35 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 Commands: `connect`, `android setup|reset`, `ca path|show|install-help`,
 `ca install|uninstall|status`, `system-proxy on|off|status`, `export --har`, `import --har`,
-`view --session`, `replay --session --id N`, and the experimental `wireguard` (only in builds
-with the `wireguard` feature). `wirust --help` lists every
+`view --session`, `replay --session --id N`, `mcp` (an MCP server for AI agents, see
+[docs/mcp.md](docs/mcp.md)), and the experimental `wireguard` (only in builds with the
+`wireguard` feature). `wirust --help` lists every
 option; `wirust COMMAND --help` (such as `wirust ca --help`) shows one command's options.
 
 ## Documentation
 
 [docs/README.md](docs/README.md) lists every document: install, desktop setup, the UI, rules,
-scripting, HAR and search, replay, passthrough, upstream proxies, WebSocket, gRPC, phones,
-WireGuard capture, architecture, design, roadmap and releasing.
+scripting, HAR and search, replay, passthrough, upstream proxies, WebSocket, gRPC, the MCP
+server, phones, WireGuard capture, architecture, design, roadmap and releasing.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers building, testing and where code goes.
 
 ## Status
 
-Version 0.3.0. 302 automated tests (unit and integration, offline, in-process servers and
+Version 0.4.0. 321 automated tests (unit and integration, offline, in-process servers and
 clients on loopback) run in CI on Linux, macOS and Windows, plus a check against Rust 1.88.
 They cover HTTP/1.1 and HTTP/2 interception, the flow record and fingerprints, failed
 handshakes, every control-plane security check, rules and breakpoints, scripts and their
 sandbox, replay, passthrough, WebSocket capture (including `permessage-deflate` and injected
 messages), gRPC and protobuf decoding with and without `.proto` schemas, `Content-Encoding`
-decoding, the code generators, upstream proxies, the system-proxy and trust-store commands
-(with a fake command runner), HAR, pairing and the UI assets. Checked by hand: curl through
-the proxy, the web UI in headless Chrome (dark and light, down to 760 px wide), and Chrome on
-an Android 16 emulator over `adb` (setup, installing the CA, decrypted HTTPS, reset on exit).
-Not tried yet: real phones, anything on iOS, `system-proxy` and `ca install` on the real
-operating systems, the experimental WireGuard mode outside its in-process test, Windows
-outside CI.
+decoding, the code generators, the MCP server (protocol, redaction, write switch), upstream
+proxies, the system-proxy and trust-store commands (with a fake command runner), HAR, pairing
+and the UI assets. Checked by hand: curl through the proxy; the web UI in headless Chrome
+(dark and light, 1400 to 760 px wide) with `scripts/ui-e2e.mjs`, 174 checks of clicks, keys,
+dialogs and layout that are run by hand and not in CI; Chrome on an Android 16 emulator over
+`adb` (setup, installing the CA, decrypted HTTPS, reset on exit); and `system-proxy` on macOS
+(on, off, Ctrl-C and a killed process, each restored the previous settings). Not tried yet:
+real phones, anything on iOS, `system-proxy` on Windows and GNOME, `ca install` on any real
+system, the experimental WireGuard mode outside its in-process test, Windows outside CI.
 
 ## Licence
 
