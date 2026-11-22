@@ -85,7 +85,11 @@ struct RunArgs {
     json: bool,
     body_limit: usize,
     upstream_insecure: bool,
+    /// The proxy may listen beyond loopback: `--allow-remote`, or implied by `connect`.
     allow_remote: bool,
+    /// `--allow-remote` was given: only then may the UI listen beyond loopback. `connect`
+    /// implies `allow_remote` for the proxy (pairing guards it) but not for the UI.
+    ui_remote: bool,
     config_dir: Option<PathBuf>,
     max_flows: usize,
     pause_timeout: Duration,
@@ -601,6 +605,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         body_limit: DEFAULT_BODY_LIMIT,
         upstream_insecure: false,
         allow_remote: false,
+        ui_remote: false,
         config_dir: None,
         max_flows: DEFAULT_MAX_FLOWS,
         pause_timeout: DEFAULT_PAUSE_TIMEOUT,
@@ -660,7 +665,10 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
                 .upstream_bypass
                 .extend_from(&value(arg)?)
                 .context("--upstream-bypass")?,
-            "--allow-remote" => run.allow_remote = true,
+            "--allow-remote" => {
+                run.allow_remote = true;
+                run.ui_remote = true;
+            }
             "--config-dir" => run.config_dir = Some(PathBuf::from(value(arg)?)),
             "--max-flows" => {
                 run.max_flows = value(arg)?.parse().context("--max-flows takes a count")?;
@@ -1258,6 +1266,17 @@ fn register_interceptors(
     Ok(rules)
 }
 
+/// Where the web UI and API may listen: beyond loopback only after an explicit
+/// `--allow-remote`. `connect` lets the proxy listen on the LAN (pairing guards that) but
+/// the UI, whose only guard is its token, stays on loopback unless the flag was given too.
+fn ui_access(args: &RunArgs) -> RemoteAccess {
+    if args.ui_remote {
+        RemoteAccess::Allow
+    } else {
+        RemoteAccess::LoopbackOnly
+    }
+}
+
 /// Starts the phone console of `connect` (the setup banner, then the approval prompts);
 /// without pairing there is none.
 fn start_console(
@@ -1331,7 +1350,7 @@ fn run(
     runtime.block_on(async {
         let mut proxy = Proxy::bind(config).await?;
         let control = match args.ui {
-            Some(addr) => Some(ControlPlane::bind(addr, remote, &mut proxy).await?),
+            Some(addr) => Some(ControlPlane::bind(addr, ui_access(&args), &mut proxy).await?),
             None => None,
         };
         // After the control plane, which adds the refused targets the listener shares.
@@ -1883,6 +1902,28 @@ mod tests {
         assert!(given.is_empty(), "{given:?}");
         assert!(matches!(parse(&args("-h"))?, Command::Help(_)));
         assert!(matches!(parse(&args("-V"))?, Command::Version));
+        Ok(())
+    }
+
+    #[test]
+    fn connect_keeps_the_ui_on_loopback_unless_allow_remote_was_given() -> anyhow::Result<()> {
+        for (line, want) in [
+            ("connect --ui 0.0.0.0:9000", RemoteAccess::LoopbackOnly),
+            (
+                "connect --ui 0.0.0.0:9000 --allow-remote",
+                RemoteAccess::Allow,
+            ),
+            ("--ui 127.0.0.1:9000", RemoteAccess::LoopbackOnly),
+            (
+                "--listen 0.0.0.0:8080 --allow-remote --ui 0.0.0.0:9000",
+                RemoteAccess::Allow,
+            ),
+        ] {
+            let (Command::Connect(run, _) | Command::Run(run, _)) = parse(&args(line))? else {
+                panic!("{line:?} must parse as a run or connect");
+            };
+            assert!(ui_access(&run) == want, "{line:?}");
+        }
         Ok(())
     }
 

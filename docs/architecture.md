@@ -85,7 +85,7 @@ empty, so ordinary traffic logs exactly the fields it did before.
 |---|---|---|
 | 128-bit token from the OS RNG, printed once as `http://ADDR/#token=...`; API needs `Authorization: Bearer` or the `token` cookie, compared in constant time; never the query string | `new_token`, `State::authorized`, `same_secret` | `the_api_needs_the_token_in_a_header_or_cookie_never_the_query` |
 | `Host` must be the listener's address (or `localhost:PORT` on loopback, or any IP literal with the listener's port when bound to an unspecified address with `--allow-remote`): DNS rebinding; `Origin`, when present, must be `http://` plus that host; no `Access-Control-*` headers | `State::host_ok`, `route` | `a_wrong_host_or_origin_is_refused` |
-| Loopback only unless `--allow-remote` (`wirust connect` sets it for its LAN listener, and the `--ui` address inherits it) | `check_listen` | `binding_beyond_loopback_needs_allow_remote` |
+| Loopback only unless `--allow-remote` (`wirust connect` implies it for its LAN listener only; the `--ui` address needs the flag given explicitly, see `ui_access` in `main.rs`) | `check_listen`, `ui_access` | `binding_beyond_loopback_needs_allow_remote`, `connect_keeps_the_ui_on_loopback_unless_allow_remote_was_given` |
 | State changes are POST (or PUT for `/api/v1/rules` and `/api/v1/passthrough`); GET never changes state | `route`, `module_routes` | `state_changes_are_post_only_and_responses_are_hardened` |
 | `no-store`, `nosniff`, `no-referrer`, `X-Frame-Options: DENY`, strict CSP (no inline script) | `handle` | same |
 | The proxy refuses targets on the control plane's port at any loopback/unspecified IP or `localhost` | `Proxy::refuse_target`, `State::refuses` | `the_proxy_refuses_to_reach_the_control_plane` |
