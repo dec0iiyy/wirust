@@ -232,7 +232,8 @@ The fragment may also carry `flow=ID`, `tab=overview|tls|request|response`, `q=F
 
 `GET /api/v1/info` (same token, `Host` and `Origin` checks) answers
 `{"name", "version", "proxy_addr", "magic_host", "ca_fingerprint_sha256", "rules_file",
-"session_file", "listen_is_loopback"}`; the fingerprint is the SHA-256 of the CA
+"session_file", "listen_is_loopback", "flows"}` (`flows`: how many flows the store holds);
+the fingerprint is the SHA-256 of the CA
 certificate's DER as colon-separated upper-case hex, as certificate viewers show it.
 `rules_file` and `session_file` are file names only (`rules.toml`), never the path as
 typed, so an absolute path does not show the home directory.

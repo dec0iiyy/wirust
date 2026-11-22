@@ -20,3 +20,5 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
 10. Diff view between two flows.
 11. Native desktop app; the UI is a browser page served by the binary.
 12. The client's TLS audit (weak ciphers, missing extensions) next to JA4.
+13. `wirust mcp` (docs/mcp.md): MCP resources and `subscriptions/listen` for live flows,
+    the Streamable HTTP transport, and pause (breakpoint) tools; it has tools over stdio only.

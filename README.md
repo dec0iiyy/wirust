@@ -131,6 +131,7 @@ profile. Limits, from the platforms' documentation:
 | Scripting | sandboxed [Rhai](https://rhai.rs) scripts with `on_request` / `on_response` hooks (`--script`): headers, decoded bodies, mock answers, block, delay, flow flags; reloaded on change; [docs/scripting.md](docs/scripting.md) |
 | Breakpoints | pause matching requests or responses in the UI; see and edit method, URL, status, headers and text body, then resume or abort |
 | Replay and compose | send a captured request again, changed or not (UI, CLI, API), or compose a new one (UI, API); [docs/replay.md](docs/replay.md) |
+| AI agents (MCP) | `wirust mcp`: a Model Context Protocol server on stdio for Claude Code, Cursor and other agents to list, search and read captured flows; secrets redacted, traffic framed as untrusted data, write tools only with `--allow-write`; [docs/mcp.md](docs/mcp.md) |
 | Sessions and HAR | append flows to a JSON Lines session file; export HAR 1.2 from the UI or CLI, import HAR from browser dev tools |
 | WebSocket | text, binary and control messages of HTTP/1.1 WebSockets, with a Messages tab; [docs/websocket.md](docs/websocket.md) |
 | gRPC, protobuf | decoding of gRPC, gRPC-Web and protobuf messages, schema-less or with field names from `.proto` files (`--proto`, compiled in-process, reloaded on change), compressed messages inflated, `grpc-status` from trailers, a gRPC tab; [docs/grpc.md](docs/grpc.md) |
