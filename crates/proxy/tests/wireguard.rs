@@ -18,9 +18,12 @@ use std::time::Duration;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use bytes::{Buf as _, Bytes};
-use common::{TestResult, http_server, next_exchange, temp_dir};
+use common::{
+    TestResult, http_server, https_server, next_event, next_exchange, temp_dir, upstream_certs,
+};
 use quinn::udp::{RecvMeta, Transmit};
-use quinn::{AsyncUdpSocket, UdpPoller};
+use quinn::{AsyncUdpSocket, ConnectionError, UdpPoller};
+use rustls::pki_types::CertificateDer;
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -29,19 +32,37 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
 };
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::io::AsyncReadExt as _;
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::{mpsc, oneshot};
+use wirust::flow::Event;
 use wirust::intercept::{Action, Interceptor, Interceptors, RequestCtx};
 use wirust::passthrough::{Lists, Passthrough};
+
 use wirust::wireguard::{Peer, Server, generate_key};
-use wirust::{Config, Proxy, RemoteAccess};
+use wirust::{Config, Proxy, RemoteAccess, UpstreamTls};
 
 /// The documentation range: never reachable, the interceptor below sends it to loopback.
 const ORIGIN_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
 const CLIENT_ADDR: Ipv4Addr = Ipv4Addr::new(10, 233, 0, 2);
 
-/// Sends requests for `origin.test` to the local plain-HTTP test server (a map-remote rule).
-struct ToLocalOrigin(u16);
+/// Sends requests for `origin.test` to a local test server (a map-remote rule).
+struct ToLocalOrigin {
+    scheme: &'static str,
+    host: &'static str,
+    port: u16,
+}
+
+impl ToLocalOrigin {
+    /// The plain-HTTP origin on `port`.
+    fn plain(port: u16) -> Self {
+        Self {
+            scheme: "http",
+            host: "127.0.0.1",
+            port,
+        }
+    }
+}
 
 impl Interceptor for ToLocalOrigin {
     fn name(&self) -> &'static str {
@@ -50,11 +71,31 @@ impl Interceptor for ToLocalOrigin {
 
     fn on_request(&self, request: &mut RequestCtx) -> Action {
         if request.host == "origin.test" {
-            "127.0.0.1".clone_into(&mut request.host);
-            request.port = self.0;
-            request.scheme = "http";
+            self.host.clone_into(&mut request.host);
+            request.port = self.port;
+            request.scheme = self.scheme;
         }
         Action::Continue
+    }
+}
+
+/// What a harness differs in.
+struct Setup<'a> {
+    origin: ToLocalOrigin,
+    /// The CA of a TLS origin, trusted for the upstream leg.
+    upstream_ca: Option<CertificateDer<'static>>,
+    passthrough: &'a [&'a str],
+    decrypt_only: &'a [&'a str],
+}
+
+impl Setup<'_> {
+    async fn plain() -> anyhow::Result<Self> {
+        Ok(Self {
+            origin: ToLocalOrigin::plain(http_server().await?),
+            upstream_ca: None,
+            passthrough: &[],
+            decrypt_only: &[],
+        })
     }
 }
 
@@ -75,21 +116,27 @@ impl Drop for Harness {
 }
 
 async fn start() -> anyhow::Result<Harness> {
-    start_with_passthrough(&[]).await
+    start_with(Setup::plain().await?).await
 }
 
-async fn start_with_passthrough(passthrough: &[&str]) -> anyhow::Result<Harness> {
-    let origin = http_server().await?;
+async fn start_with(setup: Setup<'_>) -> anyhow::Result<Harness> {
     let dir = temp_dir();
     let mut interceptors = Interceptors::new();
-    interceptors.push(Arc::new(ToLocalOrigin(origin)));
-    let passthrough: Vec<String> = passthrough.iter().map(|s| (*s).to_owned()).collect();
-    let config = Config {
+    interceptors.push(Arc::new(setup.origin));
+    let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let lists = Lists::parse(&owned(setup.passthrough), &owned(setup.decrypt_only))
+        .map_err(anyhow::Error::msg)?;
+    let mut config = Config {
         listen: "127.0.0.1:0".parse()?,
         interceptors,
-        passthrough: Passthrough::new(Lists::parse(&passthrough, &[]).map_err(anyhow::Error::msg)?),
+        passthrough: Passthrough::new(lists),
         ..Config::new(dir.clone())
     };
+    if let Some(ca) = setup.upstream_ca {
+        config.upstream = UpstreamTls::Verify {
+            extra_roots: vec![ca],
+        };
+    }
     let proxy = Proxy::bind(config).await?;
     let client_key = generate_key()?;
     let peer = Peer {
@@ -311,20 +358,167 @@ async fn a_tunneled_http3_request_becomes_an_h3_flow() -> TestResult {
 }
 
 #[tokio::test]
-async fn quic_to_a_passthrough_host_is_refused_so_the_client_falls_back() -> TestResult {
-    let harness = start_with_passthrough(&["origin.test"]).await?;
+async fn http3_reaches_a_tls_origin_over_h2() -> TestResult {
+    let certs = upstream_certs()?;
+    let port = https_server(&certs).await?;
+    let mut harness = start_with(Setup {
+        origin: ToLocalOrigin {
+            scheme: "https",
+            host: "localhost",
+            port,
+        },
+        upstream_ca: Some(certs.ca.clone()),
+        passthrough: &[],
+        decrypt_only: &[],
+    })
+    .await?;
     let (endpoint, _pump) = quic_client(&harness).await?;
-    let connecting = endpoint.connect(SocketAddr::new(ORIGIN_IP.into(), 443), "origin.test")?;
-    let result = tokio::time::timeout(Duration::from_secs(10), connecting).await?;
-    let error = result
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("the handshake must fail"))?;
-    // The proxy has no certificate for the host, so the client sees a TLS failure (and a
-    // browser retries over TCP, which the passthrough rule relays raw).
-    assert!(
-        error.to_string().contains("no server certificate"),
-        "{error}"
+    let (_, mut send) = h3_connect(&endpoint, "origin.test").await?;
+    let (status, body) = get(&mut send, "https://origin.test/tls-upstream").await?;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello from /tls-upstream");
+    let exchange = next_exchange(&mut harness.proxy_events).await?;
+    assert_eq!(exchange.client_version, "h3", "{exchange:?}");
+    assert_eq!(
+        exchange.upstream_version.as_deref(),
+        Some("h2"),
+        "{exchange:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn quic_to_a_passthrough_host_is_refused_so_the_client_falls_back() -> TestResult {
+    let mut harness = start_with(Setup {
+        passthrough: &["origin.test"],
+        ..Setup::plain().await?
+    })
+    .await?;
+    assert_refused(&harness, "origin.test").await?;
+    // The refusal is a `TLS-FAIL` record, as on the TCP path.
+    let Event::TlsFailure(failure) = next_event(&mut harness.proxy_events).await? else {
+        anyhow::bail!("expected a TLS failure");
+    };
+    assert_eq!(failure.client.ip(), CLIENT_ADDR);
+    assert_eq!(failure.target, format!("{ORIGIN_IP}:443"));
+    assert!(failure.reason.starts_with("QUIC: "), "{}", failure.reason);
+    Ok(())
+}
+
+#[tokio::test]
+async fn quic_to_a_host_outside_decrypt_only_is_refused() -> TestResult {
+    let harness = start_with(Setup {
+        decrypt_only: &["other.test"],
+        ..Setup::plain().await?
+    })
+    .await?;
+    assert_refused(&harness, "origin.test").await
+}
+
+#[tokio::test]
+async fn quic_without_sni_is_refused() -> TestResult {
+    let harness = start().await?;
+    // An IP address as the server name: rustls sends no SNI.
+    assert_refused(&harness, &ORIGIN_IP.to_string()).await
+}
+
+#[tokio::test]
+async fn quic_naming_localhost_gets_no_requests() -> TestResult {
+    let harness = start().await?;
+    let (endpoint, _pump) = quic_client(&harness).await?;
+    let connection =
+        (endpoint.connect(SocketAddr::new(ORIGIN_IP.into(), 443), "localhost")?).await?;
+    let closed = tokio::time::timeout(Duration::from_secs(10), connection.closed()).await?;
+    let ConnectionError::ApplicationClosed(close) = closed else {
+        anyhow::bail!("expected the server to close the connection, got {closed}");
+    };
+    assert_eq!(u64::from(close.error_code), 0x10b, "H3_REQUEST_REJECTED");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_client_that_disconnects_cancels_the_upstream_request() -> TestResult {
+    // An origin that reads one request head, never answers, and reports when the proxy
+    // closes the connection.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let (got_request, request_seen) = oneshot::channel();
+    let (got_close, upstream_closed) = oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        }
+        let _ = got_request.send(());
+        while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+        let _ = got_close.send(());
+    });
+    let harness = start_with(Setup {
+        origin: ToLocalOrigin::plain(port),
+        ..Setup::plain().await?
+    })
+    .await?;
+    let (endpoint, _pump) = quic_client(&harness).await?;
+    let (connection, mut send) = h3_connect(&endpoint, "origin.test").await?;
+    let request = http::Request::get("https://origin.test/never-answered").body(())?;
+    let mut stream = send.send_request(request).await?;
+    stream.finish().await?;
+    tokio::time::timeout(Duration::from_secs(10), request_seen).await??;
+    connection.close(0_u32.into(), b"gone");
+    tokio::time::timeout(Duration::from_secs(10), upstream_closed).await??;
+    Ok(())
+}
+
+/// Opens a QUIC connection to `origin.test` at [`ORIGIN_IP`] and an HTTP/3 session on it.
+async fn h3_connect(
+    endpoint: &quinn::Endpoint,
+    name: &str,
+) -> anyhow::Result<(
+    quinn::Connection,
+    h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+)> {
+    let connection = (endpoint.connect(SocketAddr::new(ORIGIN_IP.into(), 443), name)?).await?;
+    let (mut driver, send) = h3::client::new(h3_quinn::Connection::new(connection.clone())).await?;
+    tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
+    Ok((connection, send))
+}
+
+/// Sends a GET for `url`; returns the status and the body as text.
+async fn get(
+    send: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    url: &str,
+) -> anyhow::Result<(u16, String)> {
+    let mut stream = send.send_request(http::Request::get(url).body(())?).await?;
+    stream.finish().await?;
+    let response = stream.recv_response().await?;
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await? {
+        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    Ok((
+        response.status().as_u16(),
+        String::from_utf8_lossy(&body).into_owned(),
+    ))
+}
+
+/// Asserts that the QUIC handshake for `name` fails with a TLS alert from the proxy.
+async fn assert_refused(harness: &Harness, name: &str) -> TestResult {
+    let (endpoint, _pump) = quic_client(harness).await?;
+    let connecting = endpoint.connect(SocketAddr::new(ORIGIN_IP.into(), 443), name)?;
+    let result = tokio::time::timeout(Duration::from_secs(10), connecting).await?;
+    let Err(ConnectionError::ConnectionClosed(close)) = result else {
+        anyhow::bail!("expected the proxy to abort the handshake, got {result:?}");
+    };
+    // 0x100..0x200: a TLS alert carried as a QUIC CRYPTO_ERROR (RFC 9001, section 4.8).
+    let code = u64::from(close.error_code);
+    assert!((0x100..0x200).contains(&code), "{close}");
     Ok(())
 }
 
