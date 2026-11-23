@@ -226,6 +226,11 @@ jobs:
           ca=$("$bin" ca path --config-dir "$RUNNER_TEMP/wirust-ca" | tr -d '\r')
           test -s "$ca"
           "$bin" ca show --config-dir "$RUNNER_TEMP/wirust-ca" | grep -q 'BEGIN CERTIFICATE'
+          # The experimental WireGuard mode is in the binary (a build without it refuses).
+          # To a file first: `grep -q` would stop reading before the QR code is written.
+          "$bin" wireguard add-peer smoke --lan-ip 127.0.0.1 --config-dir "$RUNNER_TEMP/wirust-ca" \
+            >"$RUNNER_TEMP/wg.txt"
+          grep -q '\[Peer\]' "$RUNNER_TEMP/wg.txt"
           echo "smoke test passed: $bin"
       # wirust-<tag>-<target>.tar.gz holds the binary, the licence files (LICENSE, NOTICE and
       # THIRD-PARTY-LICENSES.md, the texts of the crates linked in) and the README; the bare

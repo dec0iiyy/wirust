@@ -45,6 +45,13 @@ ca=$("$bin" ca path --config-dir "$work/cfg")
 "$bin" ca show --config-dir "$work/cfg" | grep -q 'BEGIN CERTIFICATE' || fail "ca show prints no PEM"
 echo "ok   CA created and shown"
 
+# The experimental WireGuard mode is a default feature; `--help` prints its text either way,
+# so add a peer, which a build without the feature refuses.
+"$bin" wireguard add-peer smoke --lan-ip 127.0.0.1 --config-dir "$work/cfg" >"$work/wg.txt" 2>&1 ||
+    fail "wireguard add-peer failed: $(cat "$work/wg.txt")"
+grep -q '\[Peer\]' "$work/wg.txt" || fail "wireguard add-peer printed no client config"
+echo "ok   wireguard add-peer"
+
 mkdir -p "$work/site"
 echo 'hello from the origin' >"$work/site/index.txt"
 origin=$(free_port)
