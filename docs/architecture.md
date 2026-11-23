@@ -73,8 +73,22 @@ built in parallel without editing the same functions.
 7. The response body streams to the client through `Tee`; when it ends, `on_end` publishes
    `Completed` (or `Failed` when the exchange has an `error`). A refused handshake publishes
    `TlsFailed`; a non-TLS tunnel publishes `Completed` with a `tunnel` record.
-8. Subscribers: `FlowStore::follow` (started in `Proxy::bind`), `print_flows` in `main.rs`
-   (text or JSON Lines), and each `GET /api/v1/events` SSE stream.
+8. The store: `Proxy::bind` makes the bus with `Bus::with_store`, so `publish` applies each
+   event to the `FlowStore` under its lock before broadcasting it. The store never misses an
+   end, however far a subscriber lags (the broadcast holds 4096 events per subscriber, and
+   WebSocket messages share it).
+9. Subscribers: `print_flows` in `main.rs` (text or JSON Lines) and each
+   `GET /api/v1/events` SSE stream. A subscriber that lags gets `RecvError::Lagged` and skips
+   ahead; the UI then reloads `GET /api/v1/flows`.
+
+The flow store is a ring with two caps: `--max-flows` (the oldest flow goes) and the byte
+budget `--max-memory` (default 512 MiB). Each flow's size is estimated once, when it is
+stored or finished (`memory::stored_flow`: body bytes, headers, trailers, URLs and a fixed
+overhead per record), and each WebSocket message adds `memory::ws_message`; a running total
+lives under the ring lock. Over the budget the oldest finished flows are evicted, with
+their WebSocket messages; pending flows and the newest eight never are. `FlowStore::list`
+copies the candidate flows out (`Arc` clones) and runs the filter and search after
+releasing the lock, so a slow search never holds up the proxy.
 
 With no interceptors the chain costs one `is_empty()` check; bodies are never buffered.
 

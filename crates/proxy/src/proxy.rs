@@ -103,6 +103,8 @@ pub struct Config {
     pub config_dir: PathBuf,
     /// Flows the in-memory [`FlowStore`] keeps.
     pub max_flows: usize,
+    /// Bytes of flow data the [`FlowStore`] keeps at most (`--max-memory`).
+    pub max_memory: usize,
     /// How long a breakpoint pause waits before the exchange goes on.
     pub pause_timeout: Duration,
     /// The interceptor chain, in order.
@@ -133,6 +135,7 @@ impl Config {
             upstream: UpstreamTls::default(),
             config_dir,
             max_flows: DEFAULT_MAX_FLOWS,
+            max_memory: crate::memory::DEFAULT_MAX_MEMORY,
             pause_timeout: DEFAULT_PAUSE_TIMEOUT,
             interceptors: Interceptors::new(),
             pauses: Pauses::new(),
@@ -229,11 +232,11 @@ impl Proxy {
         {
             bail!("the upstream proxy {proxy} is this proxy's own listener {listen}");
         }
-        let bus = Bus::new();
+        let store =
+            FlowStore::with_limits(config.max_flows, config.ws.max_messages, config.max_memory);
+        // The store is written on publish, not through a subscription that could lag.
+        let bus = Bus::with_store(store.clone());
         config.pauses.attach(bus.clone());
-        let store = FlowStore::with_ws_messages(config.max_flows, config.ws.max_messages);
-        // The task ends when the bus closes, which is when the proxy is dropped.
-        drop(store.follow(bus.subscribe()));
         let state = State {
             certs: CertCache::new(ca),
             connector: Connector::new(

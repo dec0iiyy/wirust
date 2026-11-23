@@ -32,6 +32,7 @@ mod magic;
 pub mod mcp;
 mod mcp_redact;
 mod mcp_tools;
+pub mod memory;
 pub mod mobile;
 pub mod mobileconfig;
 pub mod oscmd;

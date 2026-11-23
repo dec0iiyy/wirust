@@ -1277,14 +1277,23 @@ impl WsStore {
         &self.live
     }
 
-    /// Adds `message`, dropping its flow's oldest message when full.
-    pub fn push(&self, message: Arc<WsMessage>) {
+    /// Adds `message`, dropping its flow's oldest message when full. Returns the estimated
+    /// bytes the dropped message held ([`crate::memory::ws_message`]), or 0.
+    #[expect(
+        clippy::must_use_candidate,
+        reason = "only the flow store tracks memory; other holders may ignore the size"
+    )]
+    pub fn push(&self, message: Arc<WsMessage>) -> usize {
         let mut flows = self.lock();
         let ring = flows.entry(message.flow_id).or_default();
-        if ring.len() >= self.max_messages {
-            ring.pop_front();
-        }
+        let dropped = if ring.len() >= self.max_messages {
+            ring.pop_front()
+                .map_or(0, |old| crate::memory::ws_message(&old))
+        } else {
+            0
+        };
         ring.push_back(message);
+        dropped
     }
 
     /// Up to `limit` messages of `flow_id` with `seq` above `after`, oldest first.

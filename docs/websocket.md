@@ -162,5 +162,6 @@ app.js provides it, and otherwise adds its own tab button.
   conversation; injected frames are always unfragmented and uncompressed.
 - A bus subscriber that falls more than 4096 events behind skips events: during a flood the
   store or the UI may miss messages (the SSE stream says `: lagged`).
-- Memory: the worst case is `--max-flows` x `--ws-max-messages` x `--ws-body-limit`; lower
-  the limits for long sessions with large messages.
+- Memory: held messages count toward `--max-memory` (default 512 MiB) with their flow, so
+  the oldest finished flows are evicted when messages fill the budget; without that cap the
+  worst case would be `--max-flows` x `--ws-max-messages` x `--ws-body-limit`.

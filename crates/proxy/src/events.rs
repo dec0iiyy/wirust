@@ -183,9 +183,14 @@ impl FlowEvent {
 }
 
 /// The broadcast channel flow events travel on. Cloning is cheap.
+///
+/// A bus made with [`Bus::with_store`] records each event in its [`FlowStore`] before
+/// broadcasting it, so the store never depends on a subscriber keeping up: a receiver that
+/// falls more than 4096 events behind loses some, the store loses none.
 #[derive(Debug, Clone)]
 pub struct Bus {
     sender: broadcast::Sender<FlowEvent>,
+    store: Option<FlowStore>,
 }
 
 impl Default for Bus {
@@ -200,6 +205,16 @@ impl Bus {
     pub fn new() -> Self {
         Self {
             sender: broadcast::channel(BUS_CAPACITY).0,
+            store: None,
+        }
+    }
+
+    /// A bus that applies every published event to `store` first, losslessly.
+    #[must_use]
+    pub fn with_store(store: FlowStore) -> Self {
+        Self {
+            store: Some(store),
+            ..Self::new()
         }
     }
 
@@ -210,8 +225,12 @@ impl Bus {
         self.sender.subscribe()
     }
 
-    /// Publishes `event`; without subscribers it is dropped.
+    /// Publishes `event`: records it in the store, if any, then broadcasts it; without
+    /// subscribers the broadcast is dropped.
     pub fn publish(&self, event: FlowEvent) {
+        if let Some(store) = &self.store {
+            store.apply(&event);
+        }
         // An error only means nobody is subscribed, which is fine.
         let _ = self.sender.send(event);
     }
@@ -299,7 +318,24 @@ impl Filter {
     }
 }
 
-/// The last N flows in memory, oldest first. Cloning is cheap and shares the buffer.
+/// Flows the byte budget never evicts: the newest ones stay even when they alone exceed it.
+const MIN_KEPT: usize = 8;
+
+/// Bytes the [`FlowStore`] holds and may hold, as `GET /api/v1/info` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MemoryUse {
+    /// Estimated bytes of the held flows and their WebSocket messages
+    /// ([`crate::memory::stored_flow`], [`crate::memory::ws_message`]).
+    pub used: usize,
+    /// The budget (`--max-memory`).
+    pub budget: usize,
+}
+
+/// The last flows in memory, oldest first. Cloning is cheap and shares the buffer.
+///
+/// Two caps apply: at most `capacity` flows (`--max-flows`; the oldest goes first) and at
+/// most a byte budget (`--max-memory`; the oldest finished flows go first, pending ones
+/// stay, and so do the newest eight).
 #[derive(Debug, Clone)]
 pub struct FlowStore {
     inner: Arc<Mutex<Ring>>,
@@ -310,7 +346,24 @@ pub struct FlowStore {
 #[derive(Debug)]
 struct Ring {
     capacity: usize,
-    flows: VecDeque<StoredFlow>,
+    budget: usize,
+    /// Sum of the `bytes` of every slot.
+    bytes: usize,
+    flows: VecDeque<Slot>,
+}
+
+/// A held flow and its estimated size, WebSocket messages included.
+#[derive(Debug)]
+struct Slot {
+    flow: StoredFlow,
+    bytes: usize,
+}
+
+impl Slot {
+    fn new(flow: StoredFlow) -> Self {
+        let bytes = crate::memory::stored_flow(&flow);
+        Self { flow, bytes }
+    }
 }
 
 impl FlowStore {
@@ -323,9 +376,18 @@ impl FlowStore {
     /// Like [`new`](Self::new), keeping at most `max_messages` WebSocket messages per flow.
     #[must_use]
     pub fn with_ws_messages(capacity: usize, max_messages: usize) -> Self {
+        Self::with_limits(capacity, max_messages, crate::memory::DEFAULT_MAX_MEMORY)
+    }
+
+    /// Like [`with_ws_messages`](Self::with_ws_messages), holding about `max_memory` bytes
+    /// of flow data at most.
+    #[must_use]
+    pub fn with_limits(capacity: usize, max_messages: usize, max_memory: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Ring {
                 capacity: capacity.max(1),
+                budget: max_memory,
+                bytes: 0,
                 flows: VecDeque::new(),
             })),
             ws: WsStore::new(max_messages),
@@ -338,81 +400,91 @@ impl FlowStore {
         &self.ws
     }
 
-    /// Applies events from `events` until the bus closes. Lagging skips the missed events.
-    #[must_use = "the task runs on its own; keep the handle only to abort it"]
-    pub fn follow(
-        &self,
-        mut events: broadcast::Receiver<FlowEvent>,
-    ) -> tokio::task::JoinHandle<()> {
-        let store = self.clone();
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(event) => store.apply(&event),
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
+    /// The estimated bytes held and the budget.
+    #[must_use]
+    pub fn memory(&self) -> MemoryUse {
+        let ring = self.lock();
+        MemoryUse {
+            used: ring.bytes,
+            budget: ring.budget,
+        }
     }
 
     /// Records one event: a start adds a pending flow, an end replaces it (or adds the flow
-    /// when its start was evicted or never published). The oldest flow goes when full.
+    /// when its start was evicted or never published), a WebSocket message joins its flow.
+    /// Flows over the count or byte cap are evicted.
     pub fn apply(&self, event: &FlowEvent) {
         let mut ring = self.lock();
-        let id = event.id();
-        if let Some(flow) = event.flow() {
-            // Ends usually arrive soon after their start, so search from the back.
-            if let Some(slot) = ring.flows.iter_mut().rev().find(|f| f.id() == id) {
-                *slot = StoredFlow::Done(Arc::clone(flow));
-                return;
+        let evicted = match event {
+            FlowEvent::Started(started) => ring.insert(StoredFlow::Pending(Arc::clone(started))),
+            FlowEvent::Completed(flow) | FlowEvent::Failed(flow) | FlowEvent::TlsFailed(flow) => {
+                ring.finish(flow)
             }
-            let evicted = ring.push(StoredFlow::Done(Arc::clone(flow)));
-            self.evict(evicted);
-        } else if let FlowEvent::Started(started) = event {
-            let evicted = ring.push(StoredFlow::Pending(Arc::clone(started)));
-            self.evict(evicted);
-        } else if let FlowEvent::WsMessage(message) = event {
-            // Messages of flows no longer held are dropped, so nothing outlives its flow.
-            let Some(StoredFlow::Done(flow)) = ring.flows.iter_mut().rev().find(|f| f.id() == id)
-            else {
-                return;
-            };
-            if let Event::Exchange(x) = &mut Arc::make_mut(flow).record {
-                x.ws_messages = Some(message.seq.saturating_add(1));
-            }
-            self.ws.push(Arc::clone(message));
+            FlowEvent::WsMessage(message) => self.add_message(&mut ring, message),
+            FlowEvent::Paused(_) | FlowEvent::Resumed(_) => Vec::new(),
+        };
+        // Under the ring lock, so a message of an evicted flow cannot slip in between.
+        for id in evicted {
+            self.ws.remove(id);
         }
     }
 
-    fn evict(&self, evicted: Option<StoredFlow>) {
-        if let Some(flow) = evicted {
-            self.ws.remove(flow.id());
+    /// Adds `message` to its finished flow; messages of flows no longer held are dropped,
+    /// so nothing outlives its flow. Returns the flows evicted to stay in budget.
+    fn add_message(&self, ring: &mut Ring, message: &Arc<WsMessage>) -> Vec<u64> {
+        let Some(slot) = ring.slot_mut(message.flow_id) else {
+            return Vec::new();
+        };
+        let StoredFlow::Done(flow) = &mut slot.flow else {
+            return Vec::new();
+        };
+        if let Event::Exchange(x) = &mut Arc::make_mut(flow).record {
+            x.ws_messages = Some(message.seq.saturating_add(1));
         }
+        let added = crate::memory::ws_message(message);
+        let dropped = self.ws.push(Arc::clone(message));
+        slot.bytes = (slot.bytes + added).saturating_sub(dropped);
+        ring.bytes = (ring.bytes + added).saturating_sub(dropped);
+        ring.shrink()
     }
 
     /// The flow with `id`, if it is still held.
     #[must_use]
     pub fn get(&self, id: u64) -> Option<StoredFlow> {
-        self.lock()
-            .flows
-            .iter()
-            .rev()
-            .find(|f| f.id() == id)
-            .cloned()
+        self.lock().slot(id).map(|slot| slot.flow.clone())
     }
 
     /// Flows whose id is in `ids` and that pass `filter`, oldest first.
+    ///
+    /// The candidates are copied out (cheap `Arc` clones) and matched after the lock is
+    /// released, so a slow search never holds up the proxy recording flows.
     #[must_use]
     pub fn list(&self, ids: impl RangeBounds<u64>, filter: &Filter) -> Vec<StoredFlow> {
-        let ring = self.lock();
-        let mut found: Vec<StoredFlow> = ring
+        self.list_by(ids, filter.limit.unwrap_or(usize::MAX), |flow| {
+            filter.matches_with_ws(flow, Some(&self.ws))
+        })
+    }
+
+    /// The newest `limit` flows with an id in `ids` that pass `keep`, oldest first; `keep`
+    /// runs without the store lock.
+    fn list_by(
+        &self,
+        ids: impl RangeBounds<u64>,
+        limit: usize,
+        mut keep: impl FnMut(&StoredFlow) -> bool,
+    ) -> Vec<StoredFlow> {
+        let candidates: Vec<StoredFlow> = self
+            .lock()
             .flows
             .iter()
+            .filter(|slot| ids.contains(&slot.flow.id()))
+            .map(|slot| slot.flow.clone())
+            .collect();
+        let mut found: Vec<StoredFlow> = candidates
+            .into_iter()
             .rev()
-            .filter(|f| ids.contains(&f.id()) && filter.matches_with_ws(f, Some(&self.ws)))
-            .take(filter.limit.unwrap_or(usize::MAX))
-            .cloned()
+            .filter(|flow| keep(flow))
+            .take(limit)
             .collect();
         found.reverse();
         found
@@ -436,14 +508,67 @@ impl FlowStore {
 }
 
 impl Ring {
-    /// Appends `flow`; returns the flow dropped to make room, if any.
-    fn push(&mut self, flow: StoredFlow) -> Option<StoredFlow> {
-        let evicted = if self.flows.len() == self.capacity {
-            self.flows.pop_front()
-        } else {
-            None
+    /// Ends usually arrive soon after their start, so search from the back.
+    fn position(&self, id: u64) -> Option<usize> {
+        self.flows.iter().rposition(|slot| slot.flow.id() == id)
+    }
+
+    fn slot(&self, id: u64) -> Option<&Slot> {
+        self.position(id).and_then(|at| self.flows.get(at))
+    }
+
+    fn slot_mut(&mut self, id: u64) -> Option<&mut Slot> {
+        self.position(id).and_then(|at| self.flows.get_mut(at))
+    }
+
+    /// Appends `flow`; returns the ids of the flows dropped to make room.
+    fn insert(&mut self, flow: StoredFlow) -> Vec<u64> {
+        let mut evicted = Vec::new();
+        if self.flows.len() >= self.capacity
+            && let Some(oldest) = self.flows.pop_front()
+        {
+            self.bytes = self.bytes.saturating_sub(oldest.bytes);
+            evicted.push(oldest.flow.id());
+        }
+        let slot = Slot::new(flow);
+        self.bytes += slot.bytes;
+        self.flows.push_back(slot);
+        evicted.extend(self.shrink());
+        evicted
+    }
+
+    /// Puts the finished `flow` in place of its pending start, keeping the WebSocket
+    /// messages already counted, or appends it.
+    fn finish(&mut self, flow: &Arc<Flow>) -> Vec<u64> {
+        let done = StoredFlow::Done(Arc::clone(flow));
+        let Some(slot) = self.slot_mut(flow.id()) else {
+            return self.insert(done);
         };
-        self.flows.push_back(flow);
+        let old = crate::memory::stored_flow(&slot.flow);
+        let new = crate::memory::stored_flow(&done);
+        slot.flow = done;
+        slot.bytes = (slot.bytes + new).saturating_sub(old);
+        self.bytes = (self.bytes + new).saturating_sub(old);
+        self.shrink()
+    }
+
+    /// Evicts the oldest finished flows until the held bytes fit the budget, sparing
+    /// pending flows and the newest [`MIN_KEPT`]. Returns the evicted ids.
+    fn shrink(&mut self) -> Vec<u64> {
+        let mut evicted = Vec::new();
+        while self.bytes > self.budget && self.flows.len() > MIN_KEPT {
+            let spare_from = self.flows.len() - MIN_KEPT;
+            let Some(at) = (self.flows.iter().take(spare_from))
+                .position(|slot| matches!(slot.flow, StoredFlow::Done(_)))
+            else {
+                break;
+            };
+            let Some(slot) = self.flows.remove(at) else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(slot.bytes);
+            evicted.push(slot.flow.id());
+        }
         evicted
     }
 }
@@ -451,7 +576,7 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::Tunnel;
+    use crate::flow::{BodyRecord, Tunnel};
 
     fn started(id: u64, url: &str) -> FlowEvent {
         FlowEvent::Started(Arc::new(Started {
@@ -533,6 +658,123 @@ mod tests {
             ..Filter::default()
         };
         assert!(store.list(.., &post).is_empty());
+    }
+
+    /// A finished exchange with `body` bytes of text in each direction.
+    fn big(id: u64, body: usize) -> FlowEvent {
+        let mut x = crate::query::tests::exchange(id, "POST", "https://big.test/", 200);
+        let text = "a".repeat(body);
+        x.request_body = BodyRecord::from_bytes(text.as_bytes(), body as u64, false);
+        x.response_body = Some(BodyRecord::from_bytes(text.as_bytes(), body as u64, false));
+        FlowEvent::finished(Event::Exchange(Box::new(x)))
+    }
+
+    fn ids(store: &FlowStore) -> Vec<u64> {
+        store
+            .list(.., &Filter::default())
+            .iter()
+            .map(StoredFlow::id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_flooded_bus_never_loses_an_end_in_the_store() {
+        let store = FlowStore::new(10_000);
+        let bus = Bus::with_store(store.clone());
+        // A subscriber that never reads lags far behind; the store must not care.
+        let mut slow = bus.subscribe();
+        bus.publish(started(1, "https://a.test/"));
+        bus.publish(tunnel(1));
+        for id in 2..6000 {
+            bus.publish(tunnel(id));
+        }
+        assert!(matches!(store.get(1), Some(StoredFlow::Done(_))));
+        assert_eq!(store.len(), 5999);
+        assert!(matches!(
+            slow.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+    }
+
+    #[test]
+    fn the_budget_evicts_the_oldest_finished_flows_and_spares_pending_ones() {
+        let one = crate::memory::stored_flow(&StoredFlow::Done(
+            big(0, 10_000).flow().cloned().expect("finished"),
+        ));
+        // Room for about ten big flows.
+        let store = FlowStore::with_limits(1000, 10, one * 10 + one / 2);
+        store.apply(&started(1, "https://pending.test/"));
+        for id in 2..=30 {
+            store.apply(&big(id, 10_000));
+        }
+        let held = ids(&store);
+        assert_eq!(held.first(), Some(&1), "the pending flow stays: {held:?}");
+        assert_eq!(held.len(), 11, "pending plus ten finished: {held:?}");
+        assert_eq!(held.last(), Some(&30));
+        assert_eq!(held[1], 21, "the oldest finished went first: {held:?}");
+        let memory = store.memory();
+        assert!(memory.used <= memory.budget, "{memory:?}");
+        // Its end arrives: now it is the oldest finished flow and goes next.
+        store.apply(&big(1, 10_000));
+        assert_eq!(ids(&store).first(), Some(&21));
+        assert!(store.get(1).is_none());
+    }
+
+    #[test]
+    fn the_budget_keeps_the_newest_flows_even_when_they_exceed_it() {
+        let store = FlowStore::with_limits(1000, 10, 1);
+        for id in 1..=20 {
+            store.apply(&big(id, 1000));
+        }
+        assert_eq!(ids(&store), (13..=20).collect::<Vec<u64>>());
+        assert!(store.memory().used > 1);
+    }
+
+    #[test]
+    fn accounting_follows_starts_ends_messages_and_evictions() {
+        let store = FlowStore::with_limits(2, 2, usize::MAX);
+        assert_eq!(store.memory().used, 0);
+        store.apply(&started(1, "https://a.test/"));
+        let pending = store.memory().used;
+        assert!(pending > 0);
+        store.apply(&big(1, 5000));
+        let done = store.memory().used;
+        assert!(done >= pending + 10_000, "{pending} -> {done}");
+        let message = |seq| {
+            let parsed = crate::ws::Parsed {
+                kind: crate::ws::Kind::Text,
+                kept: vec![b'x'; 3000],
+                size: 3000,
+                compression: None,
+            };
+            let message = crate::ws::message(1, seq, crate::ws::Direction::ServerToClient, &parsed);
+            FlowEvent::WsMessage(Arc::new(message))
+        };
+        store.apply(&message(0));
+        let with_message = store.memory().used;
+        assert!(with_message >= done + 3000, "{done} -> {with_message}");
+        store.apply(&message(1));
+        store.apply(&message(2));
+        // Two messages per flow at most: the third replaced the first.
+        assert_eq!(store.memory().used - with_message, with_message - done);
+        store.apply(&tunnel(2));
+        store.apply(&tunnel(3));
+        assert_eq!(ids(&store), [2, 3]);
+        assert_eq!(store.ws().len(1), 0);
+        let two_tunnels = 2 * crate::memory::stored_flow(&StoredFlow::Done(
+            tunnel(2).flow().cloned().expect("finished"),
+        ));
+        assert_eq!(store.memory().used, two_tunnels);
+    }
+
+    #[test]
+    fn list_matches_outside_the_store_lock() {
+        let store = FlowStore::new(10);
+        store.apply(&started(1, "https://a.test/"));
+        store.apply(&started(2, "https://b.test/"));
+        // The predicate takes the store lock itself: it would deadlock if `list` held it.
+        let found = store.list_by(.., usize::MAX, |flow| store.get(flow.id()).is_some());
+        assert_eq!(found.len(), 2);
     }
 
     #[test]
