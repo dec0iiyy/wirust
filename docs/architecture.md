@@ -24,6 +24,7 @@ built in parallel without editing the same functions.
 | `intercept.rs` | `Interceptor`, `Action`, `Interceptors` (the chain), `Pauses`/`PauseHandle`, built-ins `HeaderRules`, `BlockHost` |
 | `control.rs` | `ControlPlane`: the `--ui` listener, JSON API, SSE, embedded UI, its security checks |
 | `magic.rs` | answers `http(s)://wirust.test/` and origin-form requests to the proxy port: setup page, `/ca.pem`, `/ca.crt`, `/ca.mobileconfig`, `/mobile-help`, `/pairing-status`, `/setup.js`, `/setup.css` |
+| `access.rs` | `Guard`: which targets a client may reach (control plane, own listener, this machine for remote clients); checked on the resolved address in `upstream::tcp` |
 | `pairing.rs` | `Pairing`: which client IPs may use a LAN proxy (loopback, `--allow-client`, approvals); `Pairing::screen` runs in `serve_client` before each request |
 | `mobile.rs` | the setup page per platform, the `connect` banner, the approval console and its hints, LAN address detection |
 | `sysproxy.rs`, `trust.rs`, `oscmd.rs` | `system-proxy` and `--system-proxy` with the saved-state file; `ca install`/`uninstall`/`status`; the `CommandRunner` trait both run OS tools through |
@@ -43,8 +44,8 @@ built in parallel without editing the same functions.
 ## One exchange
 
 1. `serve_client` accepts the client; `proxy_request` handles `CONNECT` or an absolute-form
-   `http://` request. Targets equal to the control plane's address get `403`
-   (`State::refuses`); `wirust.test` goes to `magic::respond`.
+   `http://` request. Targets the guard refuses (`access::Guard`, see the security table)
+   get `403` (`508` for the proxy's own listener); `wirust.test` goes to `magic::respond`.
 2. CONNECT: `tunnel` peeks the ClientHello, fingerprints it, issues a leaf, accepts TLS and
    serves h2 or HTTP/1.1. Each request calls `forward`.
 3. `forward` builds the `Exchange` record and publishes `FlowEvent::Started`.
@@ -88,7 +89,7 @@ empty, so ordinary traffic logs exactly the fields it did before.
 | Loopback only unless `--allow-remote` (`wirust connect` implies it for its LAN listener only; the `--ui` address needs the flag given explicitly, see `RunArgs::ui_access` in `main.rs`) | `check_listen`, `RunArgs::ui_access` | `binding_beyond_loopback_needs_allow_remote`, `connect_keeps_the_ui_on_loopback_unless_allow_remote_was_given` |
 | State changes are POST (or PUT for `/api/v1/rules` and `/api/v1/passthrough`); GET never changes state | `route`, `module_routes` | `state_changes_are_post_only_and_responses_are_hardened` |
 | `no-store`, `nosniff`, `no-referrer`, `X-Frame-Options: DENY`, strict CSP (no inline script) | `handle` | same |
-| The proxy refuses targets on the control plane's port at any loopback/unspecified IP or `localhost` | `Proxy::refuse_target`, `State::refuses` | `the_proxy_refuses_to_reach_the_control_plane` |
+| One check (`Guard::check`) decides every target, on the canonical address really dialled (a name is resolved once, every answer checked, those addresses dialled): the control plane and the proxy's own listener are refused for every client, at any loopback or unspecified IP and in any spelling (`127.1`, `2130706433`, `[::ffff:127.0.0.1]`, `localhost.`); a client on another machine is also refused loopback, unspecified and link-local targets (`169.254.0.0/16`, `fe80::/10`). It covers plain HTTP, CONNECT (intercepted and passthrough), WebSocket upgrades and the WireGuard path. A map-remote, breakpoint or script target is the owner's choice and is judged as from this machine. Through an upstream proxy, which resolves names itself, only IP literals and `localhost` names are checked | `access.rs`, `Proxy::refuse_target`, `upstream::tcp` | `the_proxy_refuses_to_reach_the_control_plane`, `access::tests` |
 
 ## Where features plug in
 
@@ -122,5 +123,6 @@ empty, so ordinary traffic logs exactly the fields it did before.
   printer reports it on stderr, the store just misses them.
 - Pauses are resolved resume, abort or edit over HTTP (`rules_api.rs`, see `docs/rules.md`).
 - Requests to the magic host are not recorded as flows.
-- `State::refuses` compares addresses only; a DNS name resolving to the control plane is not
-  refused by the proxy, but the control plane rejects its `Host`.
+- Through an upstream proxy the target name is resolved by that proxy, so a name that
+  resolves to loopback there is not caught by the guard (literals and `localhost` names
+  are).

@@ -247,7 +247,21 @@ async fn state_changes_are_post_only_and_responses_are_hardened() -> TestResult 
 async fn the_proxy_refuses_to_reach_the_control_plane() -> TestResult {
     let ui = start_ui(false).await?;
     let port = ui.addr.port();
-    for host in ["127.0.0.1", "localhost", "127.0.0.2", "0.0.0.0"] {
+    // Every spelling of this machine: short and numeric IPv4 forms, IPv4-mapped IPv6, a
+    // trailing dot.
+    let hosts = [
+        "127.0.0.1",
+        "localhost",
+        "127.0.0.2",
+        "0.0.0.0",
+        "127.1",
+        "2130706433",
+        "0x7f.1",
+        "[::ffff:127.0.0.1]",
+        "localhost.",
+        "app.localhost",
+    ];
+    for host in hosts {
         let (_, head) = connect_head(ui.proxy.addr, host, port).await?;
         assert!(
             head.starts_with(b"HTTP/1.1 403"),

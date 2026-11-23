@@ -1,5 +1,6 @@
 //! Connections from the proxy to servers.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+use crate::access::Guard;
 use crate::proxy::{ProxyBody, UpstreamTls};
 use crate::upstream_proxy::{self, Kind, Route};
 
@@ -22,16 +24,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// TLS settings toward servers: one config offering h2 and HTTP/1.1, one offering only
 /// HTTP/1.1, picked by what the client offered.
-/// Also holds the route: which connections go through an upstream proxy.
+/// Also holds the route (which connections go through an upstream proxy) and the guard
+/// every dial is checked against.
 #[derive(Debug, Clone)]
 pub(crate) struct Connector {
     h2: Arc<ClientConfig>,
     h1: Arc<ClientConfig>,
     route: Route,
+    guard: Guard,
 }
 
 impl Connector {
-    pub(crate) fn new(tls: &UpstreamTls, route: Route) -> anyhow::Result<Self> {
+    pub(crate) fn new(tls: &UpstreamTls, route: Route, guard: Guard) -> anyhow::Result<Self> {
         let base = match tls {
             UpstreamTls::Verify { extra_roots } => {
                 let mut roots = RootCertStore {
@@ -58,7 +62,18 @@ impl Connector {
             h2: with_alpn(&[b"h2", b"http/1.1"]),
             h1: with_alpn(&[b"http/1.1"]),
             route,
+            guard,
         })
+    }
+
+    /// The addresses no dial may reach.
+    pub(crate) fn guard(&self) -> &Guard {
+        &self.guard
+    }
+
+    /// Adds a control plane address to the guard.
+    pub(crate) fn refuse(&mut self, addr: std::net::SocketAddr) {
+        self.guard.refuse(addr);
     }
 }
 
@@ -158,17 +173,30 @@ pub(crate) struct Opened {
     pub(crate) tls: Option<Duration>,
 }
 
-/// A TCP stream to `host:port`, tunnelled through the upstream proxy when the route says
-/// so.
-async fn tcp(connector: &Connector, host: &str, port: u16) -> anyhow::Result<(TcpStream, Via)> {
+/// A TCP stream to `host:port` for the client `peer`, tunnelled through the upstream proxy
+/// when the route says so. A direct connection resolves `host` once, checks every address
+/// with the guard and dials exactly those; through the upstream proxy, which resolves the
+/// name itself, only IP literals and `localhost` names can be checked.
+async fn tcp(
+    connector: &Connector,
+    peer: IpAddr,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<(TcpStream, Via)> {
     if let Some(proxy) = connector.route.via(host) {
+        connector.guard.check_name(peer, host, port)?;
         let stream = upstream_proxy::tunnel(proxy, host, port, CONNECT_TIMEOUT).await?;
         return Ok((stream, Via::Tunnel));
     }
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
+    let attempt = async {
+        let addrs = connector.guard.resolve(peer, host, port).await?;
+        TcpStream::connect(addrs.as_slice())
+            .await
+            .with_context(|| format!("connecting to {host}:{port}"))
+    };
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, attempt)
         .await
-        .map_err(|_| anyhow!("connecting to {host}:{port} timed out"))?
-        .with_context(|| format!("connecting to {host}:{port}"))?;
+        .map_err(|_| anyhow!("connecting to {host}:{port} timed out"))??;
     stream.set_nodelay(true)?;
     Ok((stream, Via::Direct))
 }
@@ -176,13 +204,14 @@ async fn tcp(connector: &Connector, host: &str, port: u16) -> anyhow::Result<(Tc
 /// Opens a TLS connection to `host:port`, offering h2 when `offer_h2`.
 pub(crate) async fn open_tls(
     connector: &Connector,
+    peer: IpAddr,
     host: &str,
     port: u16,
     offer_h2: bool,
     upgrades: bool,
 ) -> anyhow::Result<Opened> {
     let start = Instant::now();
-    let (tcp, via) = tcp(connector, host, port).await?;
+    let (tcp, via) = tcp(connector, peer, host, port).await?;
     let connect = start.elapsed();
     let config = if offer_h2 && !upgrades {
         &connector.h2
@@ -208,6 +237,7 @@ pub(crate) async fn open_tls(
 /// ordinary requests go to the proxy in absolute form; upgrades take a CONNECT tunnel.
 pub(crate) async fn open_plain(
     connector: &Connector,
+    peer: IpAddr,
     host: &str,
     port: u16,
     upgrades: bool,
@@ -215,6 +245,7 @@ pub(crate) async fn open_plain(
     let start = Instant::now();
     let (tcp, via) = match connector.route.via(host) {
         Some(proxy) if proxy.kind() == Kind::Http && !upgrades => {
+            connector.guard.check_name(peer, host, port)?;
             let stream = upstream_proxy::connect_forward(proxy, CONNECT_TIMEOUT).await?;
             let auth = proxy
                 .basic_auth()
@@ -226,7 +257,7 @@ pub(crate) async fn open_plain(
                 .transpose()?;
             (stream, Via::Forward(auth))
         }
-        _ => tcp(connector, host, port).await?,
+        _ => tcp(connector, peer, host, port).await?,
     };
     let connect = start.elapsed();
     let conn = handshake(TokioIo::new(tcp), false, upgrades).await?;
@@ -240,10 +271,11 @@ pub(crate) async fn open_plain(
 /// Opens a raw TCP connection for a pass-through tunnel.
 pub(crate) async fn open_raw(
     connector: &Connector,
+    peer: IpAddr,
     host: &str,
     port: u16,
 ) -> anyhow::Result<TcpStream> {
-    Ok(tcp(connector, host, port).await?.0)
+    Ok(tcp(connector, peer, host, port).await?.0)
 }
 
 async fn handshake<I>(io: TokioIo<I>, h2: bool, upgrades: bool) -> anyhow::Result<Conn>
