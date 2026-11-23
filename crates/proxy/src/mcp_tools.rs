@@ -48,7 +48,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "get_flow",
-        description: "Show one flow: its head, and the parts asked for: request, response, bodies, tls, timing (default: request, response, timing). Text bodies are decoded; binary bodies are summarised as hex and base64 previews; long bodies are cut and marked truncated.",
+        description: "Show one flow: its head, and the parts asked for: request, response, bodies, tls, timing (default: request, response, timing). Text bodies are decoded; binary bodies are hidden while redaction is on (hex and base64 previews with --no-redact); long bodies are cut and marked truncated.",
         schema: schema_get_flow,
         writes: false,
     },
