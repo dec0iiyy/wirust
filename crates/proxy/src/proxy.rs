@@ -27,6 +27,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::TlsAcceptor;
 
+use crate::access::{Denied, Guard};
 use crate::body::{self, Buffered, Capture, OnEnd, SharedCapture, Tee};
 use crate::ca::Ca;
 use crate::certs::CertCache;
@@ -179,8 +180,6 @@ pub(crate) struct State {
     pause_timeout: Duration,
     /// The proxy's own listening address.
     pub(crate) listen: SocketAddr,
-    /// Addresses the proxy refuses to forward to (the control plane).
-    refused: Vec<SocketAddr>,
     /// Which clients may use the proxy; `None` serves everyone who can connect.
     pub(crate) pairing: Option<Pairing>,
     passthrough: Passthrough,
@@ -203,27 +202,10 @@ impl State {
         self.certs.ca()
     }
 
-    /// Whether `host:port` names a refused address. Any loopback or unspecified IP and
-    /// `localhost` count as the same machine, so `127.0.0.2:PORT` cannot sneak past.
-    pub(crate) fn refuses(&self, host: &str, port: u16) -> bool {
-        self.refused
-            .iter()
-            .any(|addr| same_machine(host, port, *addr))
+    /// The addresses no dial may reach (see [`Guard::check`]).
+    pub(crate) fn guard(&self) -> &Guard {
+        self.connector.guard()
     }
-}
-
-/// Whether `host:port` names `addr` on this machine: any loopback or unspecified IP and
-/// `localhost` count as the same machine.
-pub(crate) fn same_machine(host: &str, port: u16, addr: SocketAddr) -> bool {
-    let ip: Option<IpAddr> = unbracket(host).parse().ok();
-    port == addr.port()
-        && (host.eq_ignore_ascii_case("localhost")
-            || ip.is_some_and(|ip| {
-                ip == addr.ip()
-                    || ip.is_loopback()
-                    || ip.is_unspecified()
-                    || addr.ip().is_unspecified()
-            }))
 }
 
 impl Proxy {
@@ -240,8 +222,10 @@ impl Proxy {
             .await
             .with_context(|| format!("binding {}", config.listen))?;
         let listen = listener.local_addr()?;
+        let guard = Guard::new(listen);
         if let Some(proxy) = &config.upstream_proxy
-            && same_machine(proxy.host(), proxy.port(), listen)
+            && guard.check_name(IpAddr::from([127, 0, 0, 1]), proxy.host(), proxy.port())
+                == Err(Denied::OwnListener)
         {
             bail!("the upstream proxy {proxy} is this proxy's own listener {listen}");
         }
@@ -255,6 +239,7 @@ impl Proxy {
             connector: Connector::new(
                 &config.upstream,
                 Route::new(config.upstream_proxy, config.upstream_bypass),
+                guard,
             )?,
             body_limit: config.body_limit,
             bus,
@@ -262,7 +247,6 @@ impl Proxy {
             interceptors: config.interceptors,
             pause_timeout: config.pause_timeout,
             listen,
-            refused: Vec::new(),
             pairing: config.pairing,
             passthrough: config.passthrough,
             ws: config.ws,
@@ -322,8 +306,8 @@ impl Proxy {
     pub fn refuse_target(&mut self, addr: SocketAddr) {
         Arc::get_mut(&mut self.state)
             .expect("the state is shared only once run() starts, which consumes the proxy")
-            .refused
-            .push(addr);
+            .connector
+            .refuse(addr);
     }
 
     /// The bound address.
@@ -415,14 +399,9 @@ async fn proxy_request(
         };
         let host = unbracket(authority.host()).to_owned();
         let port = authority.port_u16().unwrap_or(443);
-        if state.refuses(&host, port) {
-            return refused();
-        }
-        if same_machine(&host, port, state.listen) {
-            return text(
-                StatusCode::LOOP_DETECTED,
-                &format!("{} refuses a tunnel to its own listener\n", crate::NAME),
-            );
+        // A name is checked again on the address it resolves to, when it is dialled.
+        if let Err(denied) = state.guard().check_name(peer.ip(), &host, port) {
+            return refusal(denied);
         }
         tokio::spawn(async move {
             if let Ok(upgraded) = hyper::upgrade::on(request).await {
@@ -436,8 +415,10 @@ async fn proxy_request(
         return magic_response(&state, peer, &request);
     };
     let host = unbracket(authority.host());
-    if state.refuses(host, authority.port_u16().unwrap_or(80)) {
-        return refused();
+    if let Err(denied) =
+        (state.guard()).check_name(peer.ip(), host, authority.port_u16().unwrap_or(80))
+    {
+        return refusal(denied);
     }
     if host.eq_ignore_ascii_case(crate::MAGIC_HOST) {
         return magic_response(&state, peer, &request);
@@ -472,8 +453,9 @@ async fn tunnel<S>(state: Arc<State>, peer: SocketAddr, host: String, port: u16,
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Ok(peeked) = hello::peek(&mut io).await else {
-        return;
+    let peeked = match hello::peek(&mut io).await {
+        Ok(peeked) => peeked,
+        Err(e) => return state.emit(tunnel_failure(&state, peer, (&host, port), &e)),
     };
     let (raw, message) = match peeked {
         Peeked::Tls { raw, message } => (raw, message),
@@ -562,6 +544,28 @@ where
     };
 }
 
+/// The record of a tunnel that ended before anything was relayed, such as a ClientHello
+/// that never completed.
+fn tunnel_failure(
+    state: &State,
+    peer: SocketAddr,
+    (host, port): (&str, u16),
+    error: &std::io::Error,
+) -> Event {
+    Event::Tunnel(Tunnel {
+        id: state.next_id(),
+        time: Utc::now().rfc3339(),
+        client: peer,
+        target: format!("{host}:{port}"),
+        bytes_up: 0,
+        bytes_down: 0,
+        error: Some(error.to_string()),
+        reason: None,
+        tls: None,
+        duration_ms: None,
+    })
+}
+
 /// Copies a non-TLS tunnel both ways and logs its size.
 async fn pass_through<S>(
     state: &State,
@@ -586,7 +590,7 @@ async fn pass_through<S>(
         duration_ms: None,
     };
     let result = async {
-        let mut server = upstream::open_raw(&state.connector, host, port).await?;
+        let mut server = upstream::open_raw(&state.connector, peer.ip(), host, port).await?;
         server.write_all(&raw).await?;
         let (up, down) = tokio::io::copy_bidirectional(&mut io, &mut server).await?;
         anyhow::Ok((up, down))
@@ -607,9 +611,10 @@ async fn pass_through<S>(
 /// CONNECT to `dst`: TLS goes through [`tunnel`] under its SNI, plain HTTP on port 80 is
 /// forwarded request by request under its `Host` header, anything else is relayed raw.
 ///
-/// Destinations on this machine (loopback, unspecified, the refused addresses, the proxy's
-/// own listener, and an SNI or `Host` of `localhost`) are dropped, so a peer cannot reach
-/// services that listen on loopback only.
+/// Destinations the guard refuses for a peer on another machine (loopback, unspecified,
+/// link-local, the control plane, the proxy's own listener, and an SNI or `Host` naming
+/// them) are dropped, so a peer cannot reach services that listen on loopback only. Names
+/// are checked again on the address they resolve to, when they are dialled.
 #[cfg(feature = "wireguard")]
 pub(crate) async fn serve_transparent<S>(
     state: Arc<State>,
@@ -619,15 +624,11 @@ pub(crate) async fn serve_transparent<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    fn local(state: &State, host: &str, port: u16) -> bool {
-        let ip: Option<IpAddr> = unbracket(host).parse().ok();
-        host.eq_ignore_ascii_case("localhost")
-            || ip.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
-            || state.refuses(host, port)
-            || same_machine(host, port, state.listen)
-    }
+    let local = |state: &State, host: &str, port: u16| {
+        state.guard().check_name(peer.ip(), host, port).is_err()
+    };
     let ip = dst.ip().to_string();
-    if local(&state, &ip, dst.port()) {
+    if state.guard().check(peer.ip(), dst).is_err() {
         return;
     }
     if dst.port() == 80 {
@@ -638,8 +639,8 @@ pub(crate) async fn serve_transparent<S>(
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.parse::<http::uri::Authority>().ok())
                     .map_or_else(|| dst.ip().to_string(), |a| unbracket(a.host()).to_owned());
-                if local(&state, &host, dst.port()) {
-                    return Ok::<_, Infallible>(refused());
+                if let Err(denied) = state.guard().check_name(peer.ip(), &host, dst.port()) {
+                    return Ok::<_, Infallible>(refusal(denied));
                 }
                 let target = Target {
                     scheme: "http",
@@ -661,8 +662,9 @@ pub(crate) async fn serve_transparent<S>(
         return;
     }
     let mut io = io;
-    let Ok(peeked) = hello::peek(&mut io).await else {
-        return;
+    let peeked = match hello::peek(&mut io).await {
+        Ok(peeked) => peeked,
+        Err(e) => return state.emit(tunnel_failure(&state, peer, (&ip, dst.port()), &e)),
     };
     let (host, raw) = match peeked {
         Peeked::Tls { raw, message } => {
@@ -747,16 +749,23 @@ impl Target {
         })
     }
 
-    async fn open(&self, connector: &Connector, upgrades: bool) -> anyhow::Result<Opened> {
+    async fn open(
+        &self,
+        connector: &Connector,
+        peer: IpAddr,
+        upgrades: bool,
+    ) -> anyhow::Result<Opened> {
         if self.scheme == "https" {
-            let host = if self.server_name.is_empty() {
+            // The CONNECT host is dialled (and checked); the SNI only names the certificate.
+            let name = if self.server_name.is_empty() {
                 &self.host
             } else {
                 &self.server_name
             };
-            upstream::open_tls(connector, host, self.port, self.offer_h2, upgrades).await
+            let server = (self.host.as_str(), self.port);
+            upstream::open_tls(connector, peer, server, name, self.offer_h2, upgrades).await
         } else {
-            upstream::open_plain(connector, &self.host, self.port, upgrades).await
+            upstream::open_plain(connector, peer, &self.host, self.port, upgrades).await
         }
     }
 }
@@ -846,9 +855,18 @@ where
         parts.headers.remove(header::HOST);
     }
     let (target, pool) = remapped.as_ref().map_or((target, pool), |r| (r, None));
-    let sender = match connect(state, target, pool, upgrade, &mut record.timing).await {
+    let sender = match connect(
+        state,
+        dialer(peer, remapped.as_ref()),
+        target,
+        pool,
+        upgrade,
+        &mut record.timing,
+    )
+    .await
+    {
         Ok(sender) => sender,
-        Err(e) => return fail(state, record, &request_capture, start, &format!("{e:#}")),
+        Err(e) => return fail_connect(state, record, &request_capture, start, &e),
     };
     if sender.via_upstream_proxy() {
         record.flags.push(Flag::UpstreamProxy);
@@ -1227,20 +1245,32 @@ fn set_length(headers: &mut HeaderMap, len: usize) {
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
 }
 
-fn refused() -> Response<ProxyBody> {
-    text(
-        StatusCode::FORBIDDEN,
-        &format!(
-            "{} refuses to proxy requests to its own control plane\n",
-            crate::NAME
-        ),
-    )
+/// The answer to a target the guard refused: `508` for the proxy's own listener (a loop),
+/// `403` otherwise.
+fn refusal(denied: Denied) -> Response<ProxyBody> {
+    let status = match denied {
+        Denied::OwnListener => StatusCode::LOOP_DETECTED,
+        Denied::ControlPlane | Denied::Local => StatusCode::FORBIDDEN,
+    };
+    text(status, &format!("{denied}\n"))
+}
+
+/// The client the guard judges a dial for: `peer`, or this machine for a target the owner's
+/// rules chose (map-remote, a breakpoint or script edit), so a rule may send a device's
+/// requests to a local server on purpose. The control plane and the listener stay refused.
+fn dialer(peer: SocketAddr, remapped: Option<&Target>) -> IpAddr {
+    match remapped {
+        Some(_) => IpAddr::from([127, 0, 0, 1]),
+        None => peer.ip(),
+    }
 }
 
 /// The tunnel's pooled server connection, or a new one; records connect and TLS times when
-/// this request opens it. Upgrades always get their own connection.
+/// this request opens it. Upgrades always get their own connection. `peer` is the client
+/// the guard judges the dial for (see [`dialer`]).
 async fn connect(
     state: &State,
+    peer: IpAddr,
     target: &Target,
     pool: Option<&Pool>,
     upgrade: bool,
@@ -1255,12 +1285,10 @@ async fn connect(
     {
         return Ok(sender.clone());
     }
-    // A map-remote target is checked here; the client's own target was checked on arrival.
-    anyhow::ensure!(
-        !state.refuses(&target.host, target.port),
-        "refused to reach the control plane"
-    );
-    let opened = target.open(&state.connector, upgrade).await?;
+    // The guard checks the address really dialled, map-remote targets included.
+    // Boxed: the dial (resolve, connect, TLS, HTTP setup, each with a limit) is large and
+    // runs once per connection, not per request.
+    let opened = Box::pin(target.open(&state.connector, peer, upgrade)).await?;
     timing.connect_ms = Some(ms(opened.connect));
     timing.tls_ms = opened.tls.map(ms);
     if let Some(guard) = guard.as_deref_mut() {
@@ -1353,6 +1381,28 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, upgrade: bool) {
 
 fn is_upgrade<B>(request: &Request<B>) -> bool {
     request.version() == Version::HTTP_11 && request.headers().contains_key(header::UPGRADE)
+}
+
+/// [`fail`] for a server connection that could not be opened; a target the guard refused
+/// is answered with [`refusal`].
+fn fail_connect(
+    state: &State,
+    record: Exchange,
+    request_capture: &SharedCapture,
+    start: Instant,
+    error: &anyhow::Error,
+) -> Response<ProxyBody> {
+    let response = fail(state, record, request_capture, start, &format!("{error:#}"));
+    if let Some(denied) = error.downcast_ref::<Denied>() {
+        return refusal(*denied);
+    }
+    if error.downcast_ref::<upstream::TimedOut>().is_some() {
+        return text(
+            StatusCode::GATEWAY_TIMEOUT,
+            &format!("{} proxy error: {error:#}\n", crate::NAME),
+        );
+    }
+    response
 }
 
 fn fail(

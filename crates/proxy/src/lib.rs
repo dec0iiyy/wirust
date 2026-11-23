@@ -8,6 +8,7 @@
 //! first TLS record of each tunnel is read by [`hello`] so the client's ClientHello can be
 //! fingerprinted before the handshake. `docs/architecture.md` maps the modules.
 
+mod access;
 pub mod adb;
 pub mod body;
 pub mod ca;

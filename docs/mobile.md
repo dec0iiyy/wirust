@@ -178,6 +178,13 @@ whether the manual trust step is still needed, is not verified. Otherwise open
   after someone answers `y` at the terminal. Approval is per source IP, kept in memory for
   the session, shown in the banner, and revoked with `r` + Enter or by restarting. With
   stdin not a terminal, every request is denied.
+- A device on the LAN cannot use the proxy to reach this computer's loopback-only
+  services (dev servers, databases, other local proxies), its unspecified address or
+  link-local addresses such as the cloud metadata service `169.254.169.254`: the target is
+  resolved once and the address really dialled is checked; the control plane and the
+  proxy's own port are refused for everybody. A `map_remote` rule you write may still send
+  a device's requests to a local server. Through `--upstream-proxy`, which resolves names
+  itself, only IP literals and `localhost` names are checked.
 - An unapproved address may load the setup page and the CA certificate (public data). Its
   proxy requests (CONNECT or absolute-form) get no answer: the connection is closed, and the
   terminal logs `rejected IP: not paired` at most once per 30 seconds per address.

@@ -85,8 +85,10 @@ A WireGuard listener is a network service. What guards it:
   as the source.
 - **No open relay to this machine**: connections to loopback, unspecified, broadcast and
   multicast addresses, to `10.233.0.1`, to the refused addresses (the UI) and to the HTTP
-  listener are not served, nor TLS with an SNI of `localhost`. A DNS name that resolves to a
-  loopback address is not caught, the same as through the proxy. The peers can otherwise
+  listener are not served, nor a `Host` or SNI naming them; the same check as for proxy
+  clients on another machine (`access::Guard`) also refuses link-local targets and runs
+  again on the address a name resolves to, right before it is dialled. A `map_remote` rule
+  you write may still send a peer's requests to a local server. The peers can otherwise
   reach whatever this computer can reach, as a proxy client can.
 - **Keys**: the server key is created with mode 0600 in a 0700 directory; peer private keys
   are never written to disk. Anyone who reads `server.key` can impersonate the server to the

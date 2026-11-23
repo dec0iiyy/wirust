@@ -22,7 +22,7 @@ the project is at 0.x.
 
 1. The CA key (`ca-key.pem` in the config directory, mode 0600) can sign a certificate for any host; whoever holds it can intercept every client that trusts the CA.
 2. The proxy listens on 127.0.0.1; any other address needs `--allow-remote`, and then anyone who reaches the port can use it. `wirust connect` is the exception for the proxy: it listens on the LAN address but serves only approved clients (point 4). The `--ui` address stays on loopback even then, unless you also pass `--allow-remote`.
-3. The control plane (`--ui`) needs a random token, checks Host and Origin, and is off unless asked for.
+3. The control plane (`--ui`) needs a random token, checks Host and Origin, and is off unless asked for. The proxy never forwards to the control plane or to itself, and a client on another machine (`--allow-remote`, `connect`, WireGuard) cannot reach this machine's loopback, unspecified or link-local addresses through it; the check runs on the resolved address that is dialled. Rules you write (map remote) may still point a device at a local server.
 4. `wirust connect` lets a phone in only after you approve its IP address (or list it with `--allow-client`); approval is per address, so a spoofed address on the same LAN inherits it.
 5. Flows, session files and HAR exports hold the traffic's passwords, cookies and tokens.
 

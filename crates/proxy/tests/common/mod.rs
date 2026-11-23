@@ -54,13 +54,19 @@ pub struct UpstreamCerts {
 }
 
 pub fn upstream_certs() -> anyhow::Result<UpstreamCerts> {
+    upstream_certs_for(&["localhost"])
+}
+
+/// A test CA and a certificate for `names` it signed.
+pub fn upstream_certs_for(names: &[&str]) -> anyhow::Result<UpstreamCerts> {
     let ca_key = KeyPair::generate()?;
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let ca = ca_params.self_signed(&ca_key)?;
     let issuer = Issuer::new(ca_params, ca_key);
     let key = KeyPair::generate()?;
-    let leaf = CertificateParams::new(vec!["localhost".to_owned()])?.signed_by(&key, &issuer)?;
+    let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    let leaf = CertificateParams::new(names)?.signed_by(&key, &issuer)?;
     Ok(UpstreamCerts {
         ca: ca.der().clone(),
         leaf: leaf.der().clone(),
@@ -257,6 +263,17 @@ pub async fn tunnel_to(
     roots: &[CertificateDer<'static>],
     alpn: &[u8],
 ) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    tunnel_with_sni(proxy, (host, port), host, roots, alpn).await
+}
+
+/// Opens a CONNECT tunnel to `host:port` and a TLS session with the SNI `sni` inside it.
+pub async fn tunnel_with_sni(
+    proxy: SocketAddr,
+    (host, port): (&str, u16),
+    sni: &str,
+    roots: &[CertificateDer<'static>],
+    alpn: &[u8],
+) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let (tcp, head) = connect_head(proxy, host, port).await?;
     anyhow::ensure!(
         head.starts_with(b"HTTP/1.1 200"),
@@ -271,7 +288,7 @@ pub async fn tunnel_to(
         .with_root_certificates(store)
         .with_no_client_auth();
     config.alpn_protocols = vec![alpn.to_vec()];
-    let name = ServerName::try_from(host.to_owned())?;
+    let name = ServerName::try_from(sni.to_owned())?;
     Ok(TlsConnector::from(Arc::new(config))
         .connect(name, tcp)
         .await?)

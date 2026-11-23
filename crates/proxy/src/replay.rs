@@ -200,7 +200,9 @@ impl Replayer {
     /// [`Refusal::Busy`] past [`MAX_IN_FLIGHT`] or [`MAX_PER_SECOND`].
     pub(crate) fn start(&self, out: Outgoing) -> Result<u64, Refusal> {
         let (host, port) = (out.server.host.as_str(), out.server.port);
-        if self.state.refuses(host, port) || proxy::same_machine(host, port, self.state.listen) {
+        // Replays come from this machine, so only the control plane and the listener count.
+        let local = std::net::IpAddr::from([127, 0, 0, 1]);
+        if self.state.guard().check_name(local, host, port).is_err() {
             return Err(Refusal::SelfTarget);
         }
         let uri = (out.path.parse()).map_err(|_| Refusal::Invalid("invalid path".to_owned()))?;

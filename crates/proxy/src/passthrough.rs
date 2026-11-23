@@ -252,7 +252,7 @@ pub(crate) async fn relay<S>(
         duration_ms: None,
     };
     let result = async {
-        let mut server = upstream::open_raw(&state.connector, host, port).await?;
+        let mut server = upstream::open_raw(&state.connector, peer.ip(), host, port).await?;
         server.write_all(&raw).await?;
         let (up, down) = tokio::io::copy_bidirectional(&mut io, &mut server).await?;
         anyhow::Ok((up, down))

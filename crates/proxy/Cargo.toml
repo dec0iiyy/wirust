@@ -69,6 +69,8 @@ wireguard = ["dep:boringtun", "dep:smoltcp"]
 [dev-dependencies]
 # Compresses test bodies; the proxy itself only decodes.
 brotli = { version = "9.1", default-features = false, features = ["std"] }
+# A paused clock, so timeout tests take no wall-clock time.
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 [lints]
 workspace = true
