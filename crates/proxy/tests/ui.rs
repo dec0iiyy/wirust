@@ -275,6 +275,12 @@ async fn info_names_the_proxy_and_the_ca_fingerprint() -> TestResult {
     assert_eq!(info["name"], wirust::NAME);
     assert_eq!(info["magic_host"], wirust::MAGIC_HOST);
     assert_eq!(info["listen_is_loopback"], true);
+    assert_eq!(
+        info["max_memory_bytes"],
+        wirust::memory::DEFAULT_MAX_MEMORY,
+        "{info}"
+    );
+    assert_eq!(info["memory_bytes"], 0, "{info}");
     assert!(
         info["version"].as_str().is_some_and(|v| !v.is_empty()),
         "{info}"

@@ -97,6 +97,7 @@ struct RunArgs {
     ui_access: RemoteAccess,
     config_dir: Option<PathBuf>,
     max_flows: usize,
+    max_memory: usize,
     pause_timeout: Duration,
     ui: Option<SocketAddr>,
     add_headers: Vec<(HeaderName, HeaderValue)>,
@@ -279,7 +280,8 @@ fn usage() -> String {
 Usage:
   {NAME} [--listen ADDR] [--json] [--body-limit BYTES] [--upstream-insecure]
          [--upstream-proxy URL] [--upstream-bypass LIST] [--system-proxy]
-         [--allow-remote] [--config-dir DIR] [--max-flows N] [--pause-timeout SECS]
+         [--allow-remote] [--config-dir DIR] [--max-flows N] [--max-memory SIZE]
+         [--pause-timeout SECS]
          [--ui ADDR] [--add-header 'NAME: VALUE']... [--remove-header NAME]...
          [--block-host HOST]... [--rules FILE] [--script FILE]... [--session FILE]
          [--proto PATH]... [--proto-include DIR]... [--proto-message TYPE]
@@ -340,6 +342,8 @@ Options:
   --allow-remote        allow a non-loopback --listen address (dangerous), also for `system-proxy on`
   --config-dir DIR      where the CA is kept (default: the platform config dir)
   --max-flows N         flows kept in memory for the UI and API (default {DEFAULT_MAX_FLOWS})
+  --max-memory SIZE     bytes of flow data kept in memory, such as 256M or 1GiB (default 512MiB);
+                        the oldest finished flows go first
   --pause-timeout SECS  how long a breakpoint waits before the exchange goes on (default {pause})
   --ui ADDR             serve the web UI and API on ADDR, such as 127.0.0.1:8081 (off by default)
   --add-header 'N: V'   set this header on every request sent to servers (repeatable)
@@ -734,6 +738,7 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         ui_access: RemoteAccess::LoopbackOnly,
         config_dir: None,
         max_flows: DEFAULT_MAX_FLOWS,
+        max_memory: wirust::memory::DEFAULT_MAX_MEMORY,
         pause_timeout: DEFAULT_PAUSE_TIMEOUT,
         ui: None,
         add_headers: Vec::new(),
@@ -800,6 +805,10 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
             "--config-dir" => run.config_dir = Some(PathBuf::from(value(arg)?)),
             "--max-flows" => {
                 run.max_flows = value(arg)?.parse().context("--max-flows takes a count")?;
+            }
+            "--max-memory" => {
+                run.max_memory =
+                    wirust::memory::parse_size(&value(arg)?).context("--max-memory")?;
             }
             "--pause-timeout" => {
                 let secs = value(arg)?
@@ -1464,6 +1473,7 @@ fn run(
             UpstreamTls::default()
         },
         max_flows: args.max_flows,
+        max_memory: args.max_memory,
         pause_timeout: args.pause_timeout,
         pairing: pairing.as_ref().map(|(pairing, _)| pairing.clone()),
         passthrough: passthrough(&args)?,
@@ -1771,7 +1781,7 @@ mod tests {
         ));
         let Command::Run(run, _) = parse(&args(
             "--ui 127.0.0.1:0 --block-host a.test --block-host b.test --add-header x-a:1 \
-             --remove-header cookie --max-flows 7 --pause-timeout 3",
+             --remove-header cookie --max-flows 7 --pause-timeout 3 --max-memory 64MiB",
         ))?
         else {
             panic!("expected run");
@@ -1779,6 +1789,8 @@ mod tests {
         assert_eq!(run.block_hosts, ["a.test", "b.test"]);
         assert_eq!((run.add_headers.len(), run.remove_headers.len()), (1, 1));
         assert_eq!((run.max_flows, run.pause_timeout.as_secs()), (7, 3));
+        assert_eq!(run.max_memory, 64 << 20);
+        assert!(parse(&args("--max-memory 12X")).is_err());
         assert!(run.ui.is_some());
         assert!(parse(&args("--bogus")).is_err());
         assert!(parse(&args("ca nope")).is_err());

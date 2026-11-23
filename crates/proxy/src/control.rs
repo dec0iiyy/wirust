@@ -471,6 +471,10 @@ struct Info<'a> {
     listen_is_loopback: bool,
     /// Flows the store holds now.
     flows: usize,
+    /// Estimated bytes of flow data the store holds now.
+    memory_bytes: usize,
+    /// The budget for them (`--max-memory`).
+    max_memory_bytes: usize,
 }
 
 /// SHA-256 of `der` as colon-separated upper-case hex, the form certificate viewers show.
@@ -485,6 +489,7 @@ fn sha256_fingerprint(der: &[u8]) -> String {
 
 impl State {
     fn info(&self) -> Info<'_> {
+        let memory = self.store.memory();
         Info {
             name: crate::NAME,
             version: env!("CARGO_PKG_VERSION"),
@@ -497,6 +502,8 @@ impl State {
             session_file: self.session_file.get().map(|file| file_name(file)),
             listen_is_loopback: self.proxy_addr.ip().is_loopback(),
             flows: self.store.len(),
+            memory_bytes: memory.used,
+            max_memory_bytes: memory.budget,
         }
     }
 

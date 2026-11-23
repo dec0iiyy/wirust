@@ -13,6 +13,7 @@
 | `--json` | | one JSON object per line instead of text |
 | `--body-limit BYTES` | `1048576` | body bytes kept per request and response |
 | `--max-flows N` | `5000` | flows kept in memory for the UI and API |
+| `--max-memory SIZE` | `512MiB` | bytes of flow data kept in memory: bodies, headers, trailers, URLs and WebSocket messages of the held flows, plus a small fixed overhead per record; plain bytes or a `K`, `M`, `G`, `KiB`, `MiB`, `GiB` suffix (all powers of 1024). Over the budget the oldest finished flows go first; pending flows and the newest eight stay. `--max-flows` still applies; `GET /api/v1/info` reports the use |
 | `--pause-timeout SECS` | `300` | how long a breakpoint waits before the exchange goes on |
 | `--config-dir DIR` | platform config dir | where the CA is kept |
 | `--session FILE` | | append every finished flow as JSON Lines (mode 0600; it holds tokens, cookies and passwords from the traffic) |
