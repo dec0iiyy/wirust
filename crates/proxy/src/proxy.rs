@@ -426,8 +426,9 @@ async fn tunnel<S>(state: Arc<State>, peer: SocketAddr, host: String, port: u16,
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Ok(peeked) = hello::peek(&mut io).await else {
-        return;
+    let peeked = match hello::peek(&mut io).await {
+        Ok(peeked) => peeked,
+        Err(e) => return state.emit(tunnel_failure(&state, peer, (&host, port), &e)),
     };
     let (raw, message) = match peeked {
         Peeked::Tls { raw, message } => (raw, message),
@@ -514,6 +515,28 @@ where
             .with_upgrades()
             .await
     };
+}
+
+/// The record of a tunnel that ended before anything was relayed, such as a ClientHello
+/// that never completed.
+fn tunnel_failure(
+    state: &State,
+    peer: SocketAddr,
+    (host, port): (&str, u16),
+    error: &std::io::Error,
+) -> Event {
+    Event::Tunnel(Tunnel {
+        id: state.next_id(),
+        time: Utc::now().rfc3339(),
+        client: peer,
+        target: format!("{host}:{port}"),
+        bytes_up: 0,
+        bytes_down: 0,
+        error: Some(error.to_string()),
+        reason: None,
+        tls: None,
+        duration_ms: None,
+    })
 }
 
 /// Copies a non-TLS tunnel both ways and logs its size.
@@ -612,8 +635,9 @@ pub(crate) async fn serve_transparent<S>(
         return;
     }
     let mut io = io;
-    let Ok(peeked) = hello::peek(&mut io).await else {
-        return;
+    let peeked = match hello::peek(&mut io).await {
+        Ok(peeked) => peeked,
+        Err(e) => return state.emit(tunnel_failure(&state, peer, (&ip, dst.port()), &e)),
     };
     let (host, raw) = match peeked {
         Peeked::Tls { raw, message } => {
@@ -1204,7 +1228,9 @@ async fn connect(
         return Ok(sender.clone());
     }
     // The guard checks the address really dialled, map-remote targets included.
-    let opened = target.open(&state.connector, peer, upgrade).await?;
+    // Boxed: the dial (resolve, connect, TLS, HTTP setup, each with a limit) is large and
+    // runs once per connection, not per request.
+    let opened = Box::pin(target.open(&state.connector, peer, upgrade)).await?;
     timing.connect_ms = Some(ms(opened.connect));
     timing.tls_ms = opened.tls.map(ms);
     if let Some(guard) = guard.as_deref_mut() {
@@ -1309,9 +1335,16 @@ fn fail_connect(
     error: &anyhow::Error,
 ) -> Response<ProxyBody> {
     let response = fail(state, record, request_capture, start, &format!("{error:#}"));
-    error
-        .downcast_ref::<Denied>()
-        .map_or(response, |denied| refusal(*denied))
+    if let Some(denied) = error.downcast_ref::<Denied>() {
+        return refusal(*denied);
+    }
+    if error.downcast_ref::<upstream::TimedOut>().is_some() {
+        return text(
+            StatusCode::GATEWAY_TIMEOUT,
+            &format!("{} proxy error: {error:#}\n", crate::NAME),
+        );
+    }
+    response
 }
 
 fn fail(

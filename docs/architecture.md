@@ -49,7 +49,10 @@ built in parallel without editing the same functions.
 2. CONNECT: `tunnel` peeks the ClientHello, fingerprints it, issues a leaf, accepts TLS and
    serves h2 or HTTP/1.1. Each request calls `forward`. The server connection goes to the
    CONNECT host and port; the SNI is only the name the server's certificate is checked
-   against.
+   against. Every step has a limit of 10 s: the rest of a started ClientHello
+   (`hello::HELLO_TIMEOUT`; the tunnel is closed and logged), the client's TLS handshake,
+   and toward the server the TCP connect, the TLS handshake and the HTTP/1.1 or HTTP/2
+   setup (`upstream.rs`; the client gets `504`).
 3. `forward` builds the `Exchange` record and publishes `FlowEvent::Started`.
 4. With interceptors registered (and not a WebSocket upgrade), `intercept_request` buffers the
    request body if any interceptor `needs_request_body` (up to `--body-limit`; over it the body

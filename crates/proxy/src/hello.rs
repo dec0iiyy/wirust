@@ -21,6 +21,9 @@ const MAX_HELLO: usize = 64 * 1024;
 /// How long to wait for the client's first byte. A server-speaks-first protocol (SMTP, SSH)
 /// sends nothing, so after this the tunnel is passed through untouched.
 const FIRST_BYTE_WAIT: Duration = Duration::from_secs(2);
+/// How long the rest of a ClientHello may take once its first byte arrived. A client that
+/// stalls mid-hello is dropped instead of holding the tunnel open forever.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the start of a tunnel holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +46,8 @@ pub enum Peeked {
 ///
 /// # Errors
 ///
-/// Fails on an I/O error of the stream.
+/// Fails on an I/O error of the stream, and with [`io::ErrorKind::TimedOut`] when a
+/// started ClientHello is not complete within [`HELLO_TIMEOUT`].
 pub async fn peek<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Peeked> {
     let mut first = [0_u8; 1];
     match tokio::time::timeout(FIRST_BYTE_WAIT, stream.read(&mut first)).await {
@@ -51,10 +55,18 @@ pub async fn peek<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Peeked> {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(e),
     }
-    let mut raw = first.to_vec();
+    let raw = first.to_vec();
     if first[0] != HANDSHAKE {
         return Ok(Peeked::Other { raw });
     }
+    tokio::time::timeout(HELLO_TIMEOUT, read_hello(stream, raw))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the ClientHello timed out"))?
+}
+
+/// Reads handshake records after the first byte (already in `raw`) until the ClientHello
+/// is complete.
+async fn read_hello<S: AsyncRead + Unpin>(stream: &mut S, mut raw: Vec<u8>) -> io::Result<Peeked> {
     let mut message = Vec::new();
     let mut record_start = 0;
     loop {
@@ -257,6 +269,21 @@ mod tests {
         let mut stream = Prefixed::new(raw, server);
         stream.read_to_end(&mut replayed).await?;
         assert_eq!(replayed, wire, "the acceptor must see the bytes as sent");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hello_that_stops_halfway_times_out() -> io::Result<()> {
+        let wire = records(&hello_message("example.com"), 20);
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        tokio::io::AsyncWriteExt::write_all(&mut client, &wire[..30]).await?;
+        // `client` stays open and silent; the paused clock jumps to each timer.
+        let outcome = tokio::time::timeout(Duration::from_secs(600), peek(&mut server)).await;
+        let error = outcome
+            .expect("peek gives up by itself")
+            .expect_err("no hello");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(client);
         Ok(())
     }
 

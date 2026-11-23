@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
 use http::{HeaderValue, Request, Response};
 use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
@@ -21,6 +21,33 @@ use crate::upstream_proxy::{self, Kind, Route};
 
 /// Limit on connecting to a server, DNS included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Limit on the TLS handshake with a server, after the TCP connection is up.
+const TLS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Limit on the HTTP/1.1 or HTTP/2 connection setup over an open connection.
+const HTTP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A step toward the server took longer than its limit; the proxy answers `504`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimedOut(&'static str);
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} timed out", self.0)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+/// Runs `step` within `limit`, failing with [`TimedOut`] naming `what`.
+async fn within<T>(
+    limit: Duration,
+    what: &'static str,
+    step: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(limit, step)
+        .await
+        .map_err(|_| TimedOut(what))?
+}
 
 /// TLS settings toward servers: one config offering h2 and HTTP/1.1, one offering only
 /// HTTP/1.1, picked by what the client offered.
@@ -194,11 +221,27 @@ async fn tcp(
             .await
             .with_context(|| format!("connecting to {host}:{port}"))
     };
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+    let stream = within(CONNECT_TIMEOUT, "connecting", attempt)
         .await
-        .map_err(|_| anyhow!("connecting to {host}:{port} timed out"))??;
+        .with_context(|| format!("{host}:{port}"))?;
     stream.set_nodelay(true)?;
     Ok((stream, Via::Direct))
+}
+
+/// The client side of a TLS handshake over `io`, within [`TLS_TIMEOUT`].
+async fn tls_handshake<I>(
+    config: &Arc<ClientConfig>,
+    name: ServerName<'static>,
+    io: I,
+) -> anyhow::Result<tokio_rustls::client::TlsStream<I>>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let connect = TlsConnector::from(Arc::clone(config)).connect(name, io);
+    within(TLS_TIMEOUT, "the TLS handshake", async {
+        Ok(connect.await?)
+    })
+    .await
 }
 
 /// Opens a TLS connection to `host:port`, sending and verifying the server name `name`
@@ -220,8 +263,7 @@ pub(crate) async fn open_tls(
         &connector.h1
     };
     let name = ServerName::try_from(name.to_owned()).context("invalid server name")?;
-    let tls = TlsConnector::from(Arc::clone(config))
-        .connect(name, tcp)
+    let tls = tls_handshake(config, name, tcp)
         .await
         .with_context(|| format!("TLS handshake with {host}:{port}"))?;
     let tls_time = start.elapsed().saturating_sub(connect);
@@ -280,6 +322,14 @@ pub(crate) async fn open_raw(
 }
 
 async fn handshake<I>(io: TokioIo<I>, h2: bool, upgrades: bool) -> anyhow::Result<Conn>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let setup = http_handshake(io, h2, upgrades);
+    within(HTTP_HANDSHAKE_TIMEOUT, "the HTTP handshake", setup).await
+}
+
+async fn http_handshake<I>(io: TokioIo<I>, h2: bool, upgrades: bool) -> anyhow::Result<Conn>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -350,5 +400,33 @@ impl ServerCertVerifier for AcceptAny {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server that accepts the connection and never answers the ClientHello.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_server_times_out_the_tls_handshake() -> anyhow::Result<()> {
+        let connector = Connector::new(
+            &UpstreamTls::Insecure,
+            Route::default(),
+            Guard::new("127.0.0.1:1".parse()?),
+        )?;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let name = ServerName::try_from("example.com")?;
+        let attempt = tls_handshake(&connector.h1, name, client);
+        let outcome = tokio::time::timeout(TLS_TIMEOUT * 10, attempt).await;
+        let error = outcome
+            .expect("the handshake gives up by itself")
+            .expect_err("no TLS");
+        assert_eq!(
+            error.downcast_ref::<TimedOut>(),
+            Some(&TimedOut("the TLS handshake"))
+        );
+        drop(server);
+        Ok(())
     }
 }
