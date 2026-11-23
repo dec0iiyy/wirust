@@ -15,6 +15,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::console::escape;
 use crate::events::{Flow, FlowEvent, SCHEMA_VERSION};
 use crate::query::Query;
 use crate::ws::{WsMessage, WsStore};
@@ -60,13 +61,16 @@ pub enum Existing {
 }
 
 impl SessionWriter {
-    /// Opens `path` for appending, creating it with mode 0600 on unix.
+    /// Opens `path` for appending, creating it with mode 0600 on unix. An existing file
+    /// readable by others is narrowed to 0600 with a warning on stderr; a symbolic link at
+    /// `path` is refused.
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be opened, or exists and `existing` is
-    /// [`Existing::Refuse`].
+    /// Fails when `path` is a symbolic link, the file cannot be opened or narrowed, or it
+    /// exists and `existing` is [`Existing::Refuse`].
     pub fn create(path: &Path, existing: Existing) -> io::Result<Self> {
+        crate::private_file::refuse_symlink(path)?;
         let mut options = OpenOptions::new();
         match existing {
             Existing::Append => options.append(true).create(true),
@@ -77,8 +81,16 @@ impl SessionWriter {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
+        let file = options.open(path)?;
+        if crate::private_file::narrow_to_owner(&file)? {
+            eprintln!(
+                "{}: warning: {} was open to other users; narrowed it to mode 0600",
+                crate::NAME,
+                path.display()
+            );
+        }
         Ok(Self {
-            file: BufWriter::new(options.open(path)?),
+            file: BufWriter::new(file),
         })
     }
 
@@ -236,7 +248,7 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
         None => read_from(io::stdin().lock()).context("reading flows from stdin")?,
     };
     for warning in &session.warnings {
-        eprintln!("{}: warning: {warning}", crate::NAME);
+        eprintln!("{}: warning: {}", crate::NAME, escape(warning));
     }
     let ws = WsStore::new(usize::MAX);
     for message in session.messages {
@@ -255,7 +267,8 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
 }
 
 /// `NAME view`: prints the flows of a session file as the live text log does, each
-/// WebSocket upgrade followed by its messages as `--ws-log` prints them.
+/// WebSocket upgrade followed by its messages as `--ws-log` prints them. Control characters
+/// are escaped, as on the live console.
 ///
 /// # Errors
 ///
@@ -263,9 +276,9 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
 pub fn view(session: &Path, filter: Option<&str>, out: &mut impl io::Write) -> anyhow::Result<()> {
     let (flows, ws) = load(Some(session), filter)?;
     for flow in flows {
-        writeln!(out, "{}", flow.record)?;
+        writeln!(out, "{}", escape(&flow.record.to_string()))?;
         for message in ws.list(flow.id(), None, usize::MAX) {
-            writeln!(out, "  {}", crate::ws::log_line(&message))?;
+            writeln!(out, "  {}", escape(&crate::ws::log_line(&message)))?;
         }
     }
     Ok(())
@@ -394,6 +407,25 @@ mod tests {
         std::fs::remove_dir_all(dir)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_wider_file_is_narrowed_and_a_symlink_refused() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir("narrow");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, "")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        drop(SessionWriter::create(&path, Existing::Append)?);
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.join("link.jsonl");
+        std::os::unix::fs::symlink(&path, &link)?;
+        assert!(SessionWriter::create(&link, Existing::Append).is_err());
+        std::fs::remove_dir_all(dir)
+    }
+
     #[test]
     fn tolerates_a_truncated_last_line_and_a_newer_schema() -> io::Result<()> {
         let mut text = serde_json::to_string(&flow(1))? + "\n\n";
@@ -471,6 +503,35 @@ mod tests {
         let back = read(&imported)?;
         let data: Vec<&str> = back.messages.iter().map(|m| m.data.as_str()).collect();
         assert_eq!(data, ["hello", "world"]);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn view_escapes_terminal_controls() -> anyhow::Result<()> {
+        let dir = temp_dir("escape");
+        let path = dir.join("s.jsonl");
+        let mut writer = SessionWriter::create(&path, Existing::Append)?;
+        for (id, (raw, _)) in (1..).zip(crate::console::tests::HOSTILE) {
+            let mut x = exchange(id, "GET", &format!("https://a.test/{raw}"), 200);
+            x.reason = Some((*raw).to_owned());
+            writer.append(&Flow::new(Event::Exchange(Box::new(x))))?;
+        }
+        drop(writer);
+        let mut out = Vec::new();
+        view(&path, None, &mut out)?;
+        let printed = String::from_utf8(out)?;
+        assert_eq!(
+            printed.lines().count(),
+            crate::console::tests::HOSTILE.len()
+        );
+        assert!(
+            !printed.chars().any(|c| c.is_control() && c != '\n'),
+            "{printed:?}"
+        );
+        for (_, shown) in crate::console::tests::HOSTILE {
+            assert!(printed.contains(shown), "{shown} missing from {printed}");
+        }
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

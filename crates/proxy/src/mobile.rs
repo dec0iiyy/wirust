@@ -233,13 +233,15 @@ fn prompt((ip, device): &(IpAddr, String)) {
 }
 
 /// The hint printed once per device after its first failed client-leg TLS handshake.
+/// `target` and `reason` come from the traffic, so control characters are escaped.
 #[must_use]
 pub fn tls_hint(ip: IpAddr, target: &str, reason: &str) -> String {
-    format!(
+    let hint = format!(
         "hint: {ip} refused the proxy's certificate for {target} ({reason}). Likely causes: the \
          CA is not trusted (iOS: enable it in Certificate Trust Settings; Android: apps trust \
          user CAs only in debug builds with debug-overrides), or the app pins its certificates."
-    )
+    );
+    crate::console::escape(&hint).into_owned()
 }
 
 /// The hint printed once when an approved device sends no proxy traffic.
@@ -559,6 +561,16 @@ mod tests {
         assert_eq!(device_name(IPHONE), "iPhone");
         assert_eq!(device_name(PIXEL), "Android");
         assert_eq!(device_name(""), "unknown device");
+    }
+
+    #[test]
+    fn device_names_are_fixed_and_hints_escape_terminal_controls() {
+        for (raw, shown) in crate::console::tests::HOSTILE {
+            assert_eq!(device_name(&format!("{raw} iPhone")), "iPhone");
+            let hint = tls_hint(IpAddr::from([192, 168, 1, 2]), raw, raw);
+            assert!(!hint.chars().any(char::is_control), "{hint:?}");
+            assert!(hint.contains(&format!("for {shown} ({shown})")), "{hint}");
+        }
     }
 
     #[test]

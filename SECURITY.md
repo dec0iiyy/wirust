@@ -28,7 +28,10 @@ the project is at 0.x.
 
 ## Scope
 
-In scope: the `wirust` binary, its web UI and its API.
+In scope: the `wirust` binary, its web UI and its API. That includes its console: traffic
+can carry terminal escape sequences, so wirust shows control characters in everything it
+prints from the traffic as `\u{1b}`-style escapes, and treats a TLS server name (SNI) that
+is not a host name or an IP address as no SNI. A way to reach the terminal raw is a bug.
 
 Out of scope: attacks that need the CA key, the config directory or a local account on the
 machine; apps that refuse the CA (pinning) or ignore the system proxy; `--upstream-insecure`

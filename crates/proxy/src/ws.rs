@@ -1208,6 +1208,12 @@ where
                 to.write_all(&buf[..n]).await?;
                 parser.feed(&buf[..n], &mut out);
                 for parsed in out.drain(..) {
+                    if parsed.kind == Kind::Close {
+                        // Nothing may follow a Close frame (RFC 6455 5.5.1): later
+                        // injections toward this side fail as closed.
+                        inbox.close();
+                        queued.clear();
+                    }
                     recorder.record(parser.direction, &parsed, false);
                 }
             }
@@ -1820,6 +1826,43 @@ mod tests {
             payload: b"x".to_vec(),
         };
         assert_eq!(live.inject(7, S2C, late), Err(InjectError::Closed));
+    }
+
+    #[tokio::test]
+    async fn no_injection_follows_a_forwarded_close_frame() {
+        let (client_side, mut client) = tokio::io::duplex(1 << 16);
+        let (server_side, mut server) = tokio::io::duplex(1 << 16);
+        let bus = Bus::new();
+        let mut events = bus.subscribe();
+        let live = Live::default();
+        let pump_live = live.clone();
+        let pump = tokio::spawn(async move {
+            let limits = WsLimits::default();
+            let ends = (client_side, server_side);
+            pump(ends, 8, bus, limits, Extensions::None, &pump_live).await;
+        });
+        while !live.is_open(8) {
+            tokio::task::yield_now().await;
+        }
+        let close = frame(true, 8, &[0x03, 0xe8], None);
+        server.write_all(&close).await.expect("write");
+        let mut got = vec![0; close.len()];
+        client.read_exact(&mut got).await.expect("read");
+        assert_eq!(got, close);
+        loop {
+            if let Ok(FlowEvent::WsMessage(m)) = events.recv().await
+                && m.kind == Kind::Close
+            {
+                break;
+            }
+        }
+        let late = Injection {
+            kind: Kind::Text,
+            payload: b"after close".to_vec(),
+        };
+        assert_eq!(live.inject(8, S2C, late), Err(InjectError::Closed));
+        drop((client, server));
+        pump.await.expect("pump ends");
     }
 
     #[test]

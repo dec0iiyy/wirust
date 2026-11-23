@@ -151,7 +151,7 @@ pub(crate) mod fake {
                         || call.starts_with("gsettings get")
                         || call.starts_with("security find-certificate")
                         || call.starts_with("security verify-cert")
-                        || call.contains("-verifystore"))
+                        || call.contains(" -store "))
                 })
                 .collect()
         }

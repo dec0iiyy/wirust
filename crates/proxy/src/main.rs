@@ -13,6 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use wirust::adb::{self, Adb};
 use wirust::ca::Ca;
+use wirust::console;
 use wirust::control::ControlPlane;
 use wirust::events::{DEFAULT_MAX_FLOWS, FlowEvent};
 use wirust::flow::Event;
@@ -21,6 +22,7 @@ use wirust::logfold::Folder;
 use wirust::oscmd::{Platform, SystemRunner};
 use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
+use wirust::private_file;
 use wirust::rules::Rules;
 use wirust::script::Scripts;
 use wirust::session;
@@ -185,6 +187,11 @@ fn mcp_options(
 ) -> anyhow::Result<wirust::mcp::Options> {
     let file = token_file
         .map(|path| {
+            // A warning, not a refusal: the token may be shared on purpose, and refusing
+            // would only push people to `--token`, which `ps` shows.
+            if let Some(warning) = private_file::readable_by_others_warning(path) {
+                eprintln!("{NAME}: warning: --token-file: {warning}");
+            }
             std::fs::read_to_string(path)
                 .map(|text| text.trim().to_owned())
                 .with_context(|| format!("reading --token-file {}", path.display()))
@@ -997,23 +1004,14 @@ fn system_proxy_target(
     Ok(addr)
 }
 
-/// Writes `text` to `path`, readable by the owner only (mode 0600 on Unix), replacing it.
+/// Writes `text` to `path`, readable by the owner only (mode 0600 on Unix), replacing it
+/// atomically; refuses a symbolic link at `path` and warns about a directory others can
+/// write to (see [`private_file`]).
 fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let file = options.open(path)?;
-        // An existing file keeps its mode on open; narrow it as well.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file
-    };
-    #[cfg(not(unix))]
-    let mut file = options.open(path)?;
-    file.write_all(text.as_bytes())
+    if let Some(warning) = private_file::shared_directory_warning(path) {
+        eprintln!("{NAME}: warning: {warning}");
+    }
+    private_file::write_atomic(path, text.as_bytes())
 }
 
 fn install_help(path: &std::path::Path) -> String {
@@ -1024,7 +1022,7 @@ you stop using the proxy. Anyone with the CA key ({NAME} keeps it next to the ce
 can impersonate any site to this machine.
 
 macOS (system keychain, asks for your password):
-  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \"{path}\"
+  sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain \"{path}\"
   remove: sudo security remove-trusted-cert -d \"{path}\"
 
 Linux, Debian/Ubuntu:
@@ -1052,7 +1050,10 @@ fn main() -> ExitCode {
     match parse(&args).and_then(execute) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{NAME}: {e:#}");
+            // Errors may quote traffic (a session file, a peer's answer); keep their lines.
+            let text = format!("{e:#}");
+            let lines: Vec<_> = text.lines().map(console::escape).collect();
+            eprintln!("{NAME}: {}", lines.join("\n"));
             ExitCode::FAILURE
         }
     }
@@ -1684,7 +1685,8 @@ async fn print_flows(
             Some(deadline) => tokio::select! {
                 received = events.recv() => received,
                 () = tokio::time::sleep_until(deadline.into()) => {
-                    if print_lines(&mut stdout, &folder.expire(Instant::now())).is_err() {
+                    let lines = escape_lines(folder.expire(Instant::now()));
+                    if print_lines(&mut stdout, &lines).is_err() {
                         break;
                     }
                     continue;
@@ -1707,26 +1709,37 @@ async fn print_flows(
 }
 
 /// The console lines `event` turns into: none for events the console does not show.
+/// Control characters from the traffic are escaped (see [`console`]).
 fn console_lines(event: &FlowEvent, json: bool, ws_log: WsLog, folder: &mut Folder) -> Vec<String> {
     let now = Instant::now();
     match event.flow() {
-        Some(flow) if json => vec![
-            serde_json::to_string(&**flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-        ],
+        Some(flow) if json => {
+            let line =
+                serde_json::to_string(&**flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+            vec![console::escape_json(&line).into_owned()]
+        }
         Some(flow) => {
             let failure = match &flow.record {
                 Event::TlsFailure(failure) => Some(failure),
                 _ => None,
             };
-            folder.lines(now, failure, flow.record.to_string())
+            escape_lines(folder.lines(now, failure, flow.record.to_string()))
         }
         None => match event {
             FlowEvent::WsMessage(message) if ws_log == WsLog::Lines => {
-                folder.lines(now, None, ws::log_line(message))
+                escape_lines(folder.lines(now, None, ws::log_line(message)))
             }
             _ => Vec::new(),
         },
     }
+}
+
+/// Text console lines with their control characters escaped.
+fn escape_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| console::escape(&line).into_owned())
+        .collect()
 }
 
 /// Writes each line and flushes, so a pipe sees them at once.
@@ -2087,6 +2100,102 @@ mod tests {
             .expect("the connect usage line follows the plain run");
         for flag in ["--passthrough PATTERN", "--decrypt-only PATTERN"] {
             assert!(run_usage.contains(flag), "{flag} missing from: {run_usage}");
+        }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{NAME}-main-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn the_token_file_replaces_an_old_one_with_mode_0600() -> anyhow::Result<()> {
+        let dir = temp_dir("token");
+        let path = dir.join("token");
+        std::fs::write(&path, "old secret, longer than the new one\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        }
+        write_private(&path, "new\n")?;
+        assert_eq!(std::fs::read_to_string(&path)?, "new\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let leftovers = std::fs::read_dir(&dir)?.count();
+        assert_eq!(leftovers, 1, "no temporary file stays behind");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_token_file_refuses_a_planted_symlink() -> anyhow::Result<()> {
+        let dir = temp_dir("token-link");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "precious\n")?;
+        let path = dir.join("token");
+        std::os::unix::fs::symlink(&victim, &path)?;
+        let error = write_private(&path, "secret\n").expect_err("a symlink must be refused");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read_to_string(&victim)?, "precious\n");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    /// Terminal escapes a hostile peer might put in a URL, reason phrase or error.
+    const HOSTILE: &str = "\u{1b}]0;t\u{7}\u{1b}]52;c;eA==\u{7}\u{1b}[2K\rforged\0\u{7f}\u{9b}";
+
+    fn hostile_flows() -> Vec<FlowEvent> {
+        let exchange: wirust::flow::Exchange = serde_json::from_value(serde_json::json!({
+            "id": 1, "time": "2026-01-02T03:04:05Z", "client": "127.0.0.1:1", "method": "GET",
+            "url": format!("http://a.test/{HOSTILE}"), "client_version": "http/1.1",
+            "upstream_version": null, "status": 200, "reason": HOSTILE,
+            "request_headers": [], "response_headers": [],
+            "request_body": {"size": 0, "truncated": false, "encoding": "utf8", "data": ""},
+            "response_body": null, "timing": {"total_ms": 1.0}, "tls": null, "error": HOSTILE,
+        }))
+        .expect("exchange fixture");
+        let failure = wirust::flow::TlsFailure {
+            id: 2,
+            time: "2026-01-02T03:04:05Z".to_owned(),
+            client: SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            target: format!("{HOSTILE}:443"),
+            sni: None,
+            ja4: HOSTILE.to_owned(),
+            known_client: Some(HOSTILE.to_owned()),
+            reason: HOSTILE.to_owned(),
+        };
+        [
+            Event::Exchange(Box::new(exchange)),
+            Event::TlsFailure(failure),
+        ]
+        .into_iter()
+        .map(|record| FlowEvent::Failed(Arc::new(wirust::events::Flow::new(record))))
+        .collect()
+    }
+
+    #[test]
+    fn console_lines_escape_terminal_controls_from_the_traffic() {
+        for event in hostile_flows() {
+            for json in [false, true] {
+                let lines = console_lines(&event, json, WsLog::Off, &mut Folder::new());
+                assert!(!lines.is_empty(), "json {json}");
+                for line in lines {
+                    assert!(!line.chars().any(char::is_control), "json {json}: {line:?}");
+                    if !json {
+                        assert!(line.contains("\\u{1b}]52;c;eA==\\u{7}"), "{line}");
+                    }
+                }
+            }
         }
     }
 }

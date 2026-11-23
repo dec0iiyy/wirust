@@ -154,8 +154,7 @@ impl Ca {
         let mut params = CertificateParams::new(vec![host.to_owned()])?;
         params.distinguished_name = DistinguishedName::new();
         params.distinguished_name.push(DnType::CommonName, host);
-        params.not_before = date!(now.year, now.month, now.day.saturating_sub(1).max(1));
-        params.not_after = date!(now.year + 1, now.month, now.day.min(28));
+        set_validity(&mut params, now, 1);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.use_authority_key_identifier_extension = true;
@@ -180,9 +179,16 @@ fn ca_params(now: Utc) -> CertificateParams {
         .push(DnType::OrganizationName, NAME);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.not_before = date!(now.year, now.month, now.day.saturating_sub(1).max(1));
-    params.not_after = date!(now.year + CA_YEARS, now.month, now.day.min(28));
+    set_validity(&mut params, now, CA_YEARS);
     params
+}
+
+/// Makes `params` valid from midnight UTC of the day before `now` (so a client whose clock is
+/// a little behind still accepts it) for `years` years.
+fn set_validity(params: &mut CertificateParams, now: Utc, years: i64) {
+    let start = now.day_before();
+    params.not_before = date!(start.year, start.month, start.day);
+    params.not_after = date!(now.year + years, now.month, now.day.min(28));
 }
 
 pub(crate) fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
@@ -233,5 +239,35 @@ mod tests {
         }
         fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    fn at(year: i64, month: u32, day: u32) -> Utc {
+        Utc {
+            year,
+            month,
+            day,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            millis: 0,
+        }
+    }
+
+    #[test]
+    fn certificates_start_a_day_early_across_month_and_year_ends() {
+        for (now, want) in [
+            (at(2026, 11, 23), (2026, 11, 22)),
+            (at(2026, 3, 1), (2026, 2, 28)),
+            (at(2024, 3, 1), (2024, 2, 29)),
+            (at(2026, 5, 1), (2026, 4, 30)),
+            (at(2027, 1, 1), (2026, 12, 31)),
+        ] {
+            let (year, month, day) = want;
+            assert_eq!(
+                ca_params(now).not_before,
+                date!(year, month, day),
+                "CA, now {now:?}"
+            );
+        }
     }
 }

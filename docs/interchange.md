@@ -7,7 +7,9 @@ headers and bearer tokens, cookies, API keys in URLs, passwords in form bodies, 
 in responses. Treat them like passwords:
 
 - session files and HAR files written by `wirust` are created with mode 0600 (owner only) on
-  unix; the start-up banner says `saving sessions to FILE (contains request data)`;
+  unix; an existing `--session` file open to other users is narrowed to 0600 with a warning,
+  and a symbolic link given as `--session` is refused; the start-up banner says
+  `saving sessions to FILE (contains request data)`;
 - before attaching a HAR to a bug report, remove what the recipient must not see (headers,
   cookies, bodies), or record a fresh session with a throwaway account;
 - the HAR route and the cURL route need the control plane's token like the rest of the API.

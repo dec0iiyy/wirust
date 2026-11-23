@@ -126,6 +126,9 @@ impl<R: CommandRunner> CaTrust<R> {
                         "add-trusted-cert",
                         "-r",
                         "trustRoot",
+                        // Trusted for TLS server certificates only, not S/MIME or code signing.
+                        "-p",
+                        "ssl",
                         "-k",
                         &keychain,
                         &path,
@@ -205,11 +208,13 @@ impl<R: CommandRunner> CaTrust<R> {
                 let sha256 = self.sha256();
                 output.success && keychain_hashes(&output.stdout).any(|hash| hash == sha256)
             }
+            // `-store` lists the certificate when it is there; `-verifystore` would also check
+            // the chain and revocation, which an offline machine fails.
             Platform::Windows => {
                 self.runner
                     .run(
                         "certutil",
-                        &args(&["-user", "-verifystore", "Root", &self.sha1()]),
+                        &args(&["-user", "-store", "Root", &self.sha1()]),
                     )?
                     .success
             }
@@ -367,7 +372,7 @@ mod tests {
         assert_eq!(
             ca.runner().writes(),
             [format!(
-                "security add-trusted-cert -r trustRoot -k {} /cfg/ca-cert.pem",
+                "security add-trusted-cert -r trustRoot -p ssl -k {} /cfg/ca-cert.pem",
                 keychain()
             )]
         );
@@ -416,9 +421,12 @@ mod tests {
             ]
         );
         let missing = FakeRunner::default().reply("certutil", Output::failed("not found"));
+        let ca = trust(missing, Platform::Windows);
+        assert_eq!(ca.status()?, TrustStatus::NotTrusted);
+        // Presence in the store, not chain validity (`-verifystore` also checks revocation).
         assert_eq!(
-            trust(missing, Platform::Windows).status()?,
-            TrustStatus::NotTrusted
+            ca.runner().calls(),
+            [format!("certutil -user -store Root {}", sha1())]
         );
         Ok(())
     }

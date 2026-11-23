@@ -830,7 +830,7 @@ impl Scripts {
                 }
                 Err(e) => {
                     let text = format!("{e}; keeping the previous version");
-                    eprintln!("{}: script {}: {text}", crate::NAME, file.name);
+                    eprintln!("{}", stderr_line(&file.name, &text));
                     state.error = Some(text.clone());
                     drop(state);
                     self.push(&file.name, "error", text);
@@ -884,7 +884,7 @@ impl Scripts {
             state.seen_errors.len() < MAX_SEEN_ERRORS && state.seen_errors.insert(text.clone());
         drop(state);
         if first {
-            eprintln!("{}: script {}: {text}", crate::NAME, file.name);
+            eprintln!("{}", stderr_line(&file.name, &text));
             self.push(&file.name, "error", text);
         }
     }
@@ -920,6 +920,12 @@ impl Scripts {
             }
         }
     }
+}
+
+/// The stderr line for a script error; the text may quote traffic, so controls are escaped.
+fn stderr_line(file: &str, text: &str) -> String {
+    let line = format!("{}: script {file}: {text}", crate::NAME);
+    crate::console::escape(&line).into_owned()
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -1053,5 +1059,19 @@ impl ScriptStage {
         failed.0.insert(self.index);
         request.extensions.insert(failed);
         Action::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_lines_escape_terminal_controls() {
+        for (raw, shown) in crate::console::tests::HOSTILE {
+            let line = stderr_line("a.rhai", &format!("on_request: {raw}"));
+            assert!(!line.chars().any(char::is_control), "{line:?}");
+            assert!(line.ends_with(shown), "{line}");
+        }
     }
 }

@@ -21,6 +21,11 @@ mode 0600 (owner only, on Unix) before the link is printed. `wirust mcp --token-
 reads the address and the token from it, so the token never appears on a command line. The
 token is new on every start; the file is rewritten each time.
 
+The file is replaced atomically: wirust writes a new file next to it (mode 0600 from the
+start) and renames it over FILE. It refuses to write when FILE is a symbolic link, and warns
+when the directory is writable by other users without the sticky bit. `wirust mcp` warns
+(and still reads it) when FILE is readable by other users; `chmod 600` it.
+
 Then register the server with the agent.
 
 Claude Code:
