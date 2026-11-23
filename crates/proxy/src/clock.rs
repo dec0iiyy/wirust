@@ -47,6 +47,21 @@ impl Utc {
         }
     }
 
+    /// The same time of day on the previous calendar day.
+    pub(crate) fn day_before(self) -> Self {
+        let (year, month, day) = match (self.month, self.day) {
+            (1, 1) => (self.year - 1, 12, 31),
+            (month, 1) => (self.year, month - 1, days_in_month(self.year, month - 1)),
+            (month, day) => (self.year, month, day - 1),
+        };
+        Self {
+            year,
+            month,
+            day,
+            ..self
+        }
+    }
+
     /// `2026-11-21T12:01:02.345Z`.
     pub(crate) fn rfc3339(self) -> String {
         let Self {
@@ -59,6 +74,16 @@ impl Utc {
             millis,
         } = self;
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+    }
+}
+
+/// Days in `month` (1 to 12) of `year`, Gregorian.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
     }
 }
 
