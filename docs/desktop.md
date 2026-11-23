@@ -27,7 +27,8 @@ it prints what it will do and the CA's SHA-256 fingerprint and waits for you to 
 
 `uninstall` removes only the certificate whose fingerprint matches the CA in the config
 directory: on macOS it first looks the certificate up by SHA-256 in the login keychain and
-does nothing when it is not there; on Windows it checks with `certutil -user -verifystore`.
+does nothing when it is not there; on Windows it checks with `certutil -user -store Root
+<SHA-1>`, which tests presence, not chain validity.
 
 `status` says `trusted` or `not trusted` on macOS (the certificate is in the login keychain)
 and Windows (it is in the user's Root store). On Linux it reports `trusted` when the CA sits
