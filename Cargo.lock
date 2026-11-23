@@ -2171,6 +2171,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "memchr",
  "prost-reflect",
  "protox",
  "qrcode",

@@ -28,8 +28,16 @@ pub const MAX_QUERY_LEN: usize = 4096;
 /// Deepest accepted nesting of parentheses and negations.
 pub const MAX_DEPTH: usize = 32;
 
-/// Bytes of each stored body that `body:` searches.
-const BODY_SEARCH_LIMIT: usize = 1024 * 1024;
+/// Bytes of each stored body that `body:` searches (after base64 decoding), documented in
+/// `docs/interchange.md`. Keeps a search over a full flow store to a fraction of a second.
+pub const BODY_SEARCH_LIMIT: usize = 256 * 1024;
+
+/// Bytes a case-insensitive search folds to lowercase at a time, in a stack buffer, so no
+/// body is ever copied whole.
+const FOLD_BLOCK: usize = 8 * 1024;
+
+/// Texts up to this long are searched with a plain scan: shorter than setting up a finder.
+const SHORT_TEXT: usize = 256;
 
 /// Field names, for error messages.
 const FIELDS: &str =
@@ -697,11 +705,70 @@ fn contains(hay: &str, needle: &str) -> bool {
     contains_bytes(hay.as_bytes(), needle.as_bytes())
 }
 
+/// Whether `hay` contains `needle` (already ASCII-lowercased), ignoring ASCII case; other
+/// bytes, UTF-8 sequences included, must match exactly.
+///
+/// Long texts are lowercased block by block into a stack buffer that overlaps the previous
+/// block by `needle.len() - 1` bytes, and each block is searched with `memchr::memmem`.
 fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty()
-        || hay
+    if needle.is_empty() {
+        return true;
+    }
+    if !needle.iter().any(u8::is_ascii_alphabetic) {
+        return memchr::memmem::find(hay, needle).is_some();
+    }
+    if hay.len() <= SHORT_TEXT || needle.len() > FOLD_BLOCK / 2 {
+        return hay
             .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle))
+            .any(|window| window.eq_ignore_ascii_case(needle));
+    }
+    let finder = memchr::memmem::Finder::new(needle);
+    let mut block = [0; FOLD_BLOCK];
+    let step = FOLD_BLOCK - (needle.len() - 1);
+    let mut start = 0;
+    loop {
+        let end = hay.len().min(start + FOLD_BLOCK);
+        let folded = &mut block[..end - start];
+        folded.copy_from_slice(&hay[start..end]);
+        folded.make_ascii_lowercase();
+        if finder.find(folded).is_some() {
+            return true;
+        }
+        if end == hay.len() {
+            return false;
+        }
+        start += step;
+    }
+}
+
+/// [`contains_bytes`] over the decoded bytes of base64 `data`, decoded a block at a time into
+/// a stack buffer that carries the last `needle.len() - 1` bytes over. Invalid base64 ends
+/// the search with no match.
+fn base64_contains(data: &[u8], needle: &[u8]) -> bool {
+    /// Base64 characters decoded at a time: 3 KiB of bytes.
+    const CHUNK: usize = 4 * 1024;
+    let carry = needle.len().saturating_sub(1);
+    if carry > CHUNK {
+        return base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .is_ok_and(|bytes| contains_bytes(&bytes, needle));
+    }
+    let mut window = [0; 2 * CHUNK];
+    let mut carried = 0;
+    for chunk in data.chunks(CHUNK) {
+        let Ok(decoded) =
+            base64::engine::general_purpose::STANDARD.decode_slice(chunk, &mut window[carried..])
+        else {
+            return false;
+        };
+        let filled = carried + decoded;
+        if contains_bytes(&window[..filled], needle) {
+            return true;
+        }
+        carried = carry.min(filled);
+        window.copy_within(filled - carried..filled, 0);
+    }
+    false
 }
 
 /// `ws:`: whether the flow has messages (empty `needle`) or one whose kept payload
@@ -726,9 +793,7 @@ fn body_contains(body: &BodyRecord, needle: &str) -> bool {
         let Some(chunk) = body.data.get(..end) else {
             return false;
         };
-        base64::engine::general_purpose::STANDARD
-            .decode(chunk)
-            .is_ok_and(|bytes| contains_bytes(&bytes, needle.as_bytes()))
+        base64_contains(chunk.as_bytes(), needle.as_bytes())
     } else {
         let data = body.data.as_bytes();
         contains_bytes(
@@ -1035,6 +1100,140 @@ pub(crate) mod tests {
         assert!(hits > 0);
         let elapsed = started.elapsed();
         assert!(elapsed.as_secs() < 2, "took {elapsed:?}");
+        Ok(())
+    }
+
+    /// The plain scan `contains_bytes` replaced: the reference for its answers.
+    fn naive(hay: &[u8], needle: &[u8]) -> bool {
+        needle.is_empty()
+            || hay
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle))
+    }
+
+    /// A long text with `needle` written at `at` in mixed case.
+    fn text_with(len: usize, at: usize, needle: &str) -> Vec<u8> {
+        let mut hay: Vec<u8> = b"lorem ipsum dolor sit amet "
+            .iter()
+            .copied()
+            .cycle()
+            .take(len)
+            .collect();
+        for (i, b) in needle.bytes().enumerate() {
+            hay[at + i] = if i % 2 == 0 {
+                b.to_ascii_uppercase()
+            } else {
+                b
+            };
+        }
+        hay
+    }
+
+    #[test]
+    fn body_search_matches_the_plain_scan_across_block_edges() {
+        let needles = ["needle", "x", "a long needle with spaces", "42-17", "zz"];
+        let len = 3 * FOLD_BLOCK + 123;
+        for needle in needles {
+            let edges = [
+                0,
+                SHORT_TEXT,
+                FOLD_BLOCK - 3,
+                FOLD_BLOCK,
+                2 * FOLD_BLOCK - 1,
+            ];
+            for at in edges.into_iter().chain([len - needle.len()]) {
+                let hay = text_with(len, at, needle);
+                assert!(
+                    contains_bytes(&hay, needle.as_bytes()),
+                    "{needle:?} at {at}"
+                );
+                assert_eq!(
+                    contains_bytes(&hay, b"absent!"),
+                    naive(&hay, b"absent!"),
+                    "{needle:?} at {at}"
+                );
+            }
+        }
+        for short in ["", "n", "Needle", "a nEEdle here"] {
+            for needle in ["", "needle", "nee"] {
+                assert_eq!(
+                    contains_bytes(short.as_bytes(), needle.as_bytes()),
+                    naive(short.as_bytes(), needle.as_bytes()),
+                    "{short:?} / {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn body_search_ignores_ascii_case_only() {
+        let mut hay = text_with(FOLD_BLOCK + 10, 0, "");
+        hay.extend_from_slice("Grüße ПРИВЕТ".as_bytes());
+        assert!(
+            contains_bytes(&hay, "grüße".as_bytes()),
+            "ASCII letters fold"
+        );
+        assert!(
+            !contains_bytes(&hay, "grÜße".as_bytes()),
+            "non-ASCII does not fold"
+        );
+        assert!(
+            contains_bytes(&hay, "ПРИВЕТ".as_bytes()),
+            "non-ASCII matches exactly"
+        );
+        assert!(
+            !contains_bytes(&hay, "привет".as_bytes()),
+            "non-ASCII does not fold"
+        );
+    }
+
+    #[test]
+    fn base64_search_finds_needles_across_decode_blocks() {
+        let len = 5 * FOLD_BLOCK;
+        for at in [0, 3 * 1024 - 2, 6 * 1024 - 1, len - 6] {
+            let mut bytes = text_with(len, at, "needle");
+            bytes[3 * 1024 + 500] = 0xff;
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            assert!(base64_contains(data.as_bytes(), b"needle"), "at {at}");
+            assert!(!base64_contains(data.as_bytes(), b"absent!"), "at {at}");
+        }
+        assert!(!base64_contains(b"not base64!", b"not"));
+    }
+
+    #[test]
+    fn body_search_stops_at_the_cap() -> Result<(), ParseQueryError> {
+        let record = |encoding: &'static str, data: String| BodyRecord {
+            size: data.len() as u64,
+            truncated: false,
+            encoding,
+            data,
+            content_encoding: None,
+        };
+        // Base64 is cut on a 4-character boundary, a byte or two before the cap.
+        let inside = text_with(BODY_SEARCH_LIMIT + 1000, BODY_SEARCH_LIMIT - 10, "inside");
+        let outside = text_with(BODY_SEARCH_LIMIT + 1000, BODY_SEARCH_LIMIT, "beyond");
+        let utf8 = |bytes: &[u8]| record("utf8", String::from_utf8_lossy(bytes).into_owned());
+        let base64 = |bytes: &[u8]| {
+            record(
+                "base64",
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            )
+        };
+        for body in [utf8(&inside), base64(&inside)] {
+            assert!(body_contains(&body, "inside"), "{}", body.encoding);
+        }
+        for body in [utf8(&outside), base64(&outside)] {
+            assert!(!body_contains(&body, "beyond"), "{}", body.encoding);
+        }
+        // A truncated body is searched as far as it was kept.
+        let mut kept = utf8(&text_with(1000, 900, "kept"));
+        kept.truncated = true;
+        kept.size = 10_000_000;
+        assert!(body_contains(&kept, "kept") && !body_contains(&kept, "inside"));
+        let query = Query::parse("body:IPSUM body:dolor")?;
+        let mut x = exchange(1, "POST", "https://a.test/", 200);
+        x.response_body = Some(utf8(&inside));
+        assert!(query.matches(&stored(x)), "several needles, any case");
         Ok(())
     }
 }
