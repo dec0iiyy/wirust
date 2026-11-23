@@ -36,6 +36,7 @@ pub mod mobileconfig;
 pub mod oscmd;
 pub mod pairing;
 pub mod passthrough;
+pub mod private_file;
 pub mod protobuf;
 mod proxy;
 pub mod qr;

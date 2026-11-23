@@ -22,6 +22,7 @@ use wirust::logfold::Folder;
 use wirust::oscmd::{Platform, SystemRunner};
 use wirust::pairing::{Cidr, Notice, Pairing};
 use wirust::passthrough::{Lists, Passthrough};
+use wirust::private_file;
 use wirust::rules::Rules;
 use wirust::script::Scripts;
 use wirust::session;
@@ -186,6 +187,11 @@ fn mcp_options(
 ) -> anyhow::Result<wirust::mcp::Options> {
     let file = token_file
         .map(|path| {
+            // A warning, not a refusal: the token may be shared on purpose, and refusing
+            // would only push people to `--token`, which `ps` shows.
+            if let Some(warning) = private_file::readable_by_others_warning(path) {
+                eprintln!("{NAME}: warning: --token-file: {warning}");
+            }
             std::fs::read_to_string(path)
                 .map(|text| text.trim().to_owned())
                 .with_context(|| format!("reading --token-file {}", path.display()))
@@ -998,23 +1004,14 @@ fn system_proxy_target(
     Ok(addr)
 }
 
-/// Writes `text` to `path`, readable by the owner only (mode 0600 on Unix), replacing it.
+/// Writes `text` to `path`, readable by the owner only (mode 0600 on Unix), replacing it
+/// atomically; refuses a symbolic link at `path` and warns about a directory others can
+/// write to (see [`private_file`]).
 fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let file = options.open(path)?;
-        // An existing file keeps its mode on open; narrow it as well.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file
-    };
-    #[cfg(not(unix))]
-    let mut file = options.open(path)?;
-    file.write_all(text.as_bytes())
+    if let Some(warning) = private_file::shared_directory_warning(path) {
+        eprintln!("{NAME}: warning: {warning}");
+    }
+    private_file::write_atomic(path, text.as_bytes())
 }
 
 fn install_help(path: &std::path::Path) -> String {
@@ -2104,6 +2101,54 @@ mod tests {
         for flag in ["--passthrough PATTERN", "--decrypt-only PATTERN"] {
             assert!(run_usage.contains(flag), "{flag} missing from: {run_usage}");
         }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{NAME}-main-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn the_token_file_replaces_an_old_one_with_mode_0600() -> anyhow::Result<()> {
+        let dir = temp_dir("token");
+        let path = dir.join("token");
+        std::fs::write(&path, "old secret, longer than the new one\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        }
+        write_private(&path, "new\n")?;
+        assert_eq!(std::fs::read_to_string(&path)?, "new\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let leftovers = std::fs::read_dir(&dir)?.count();
+        assert_eq!(leftovers, 1, "no temporary file stays behind");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_token_file_refuses_a_planted_symlink() -> anyhow::Result<()> {
+        let dir = temp_dir("token-link");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "precious\n")?;
+        let path = dir.join("token");
+        std::os::unix::fs::symlink(&victim, &path)?;
+        let error = write_private(&path, "secret\n").expect_err("a symlink must be refused");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read_to_string(&victim)?, "precious\n");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     /// Terminal escapes a hostile peer might put in a URL, reason phrase or error.
