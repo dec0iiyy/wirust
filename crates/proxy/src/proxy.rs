@@ -20,11 +20,11 @@ use http_body_util::{BodyExt as _, Empty, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_rustls::TlsAcceptor;
 
 use crate::access::{Denied, Guard};
@@ -37,6 +37,7 @@ use crate::flow::{
     BodyRecord, ClientTls, Event, Exchange, Flag, Timing, TlsFailure, Tunnel, TunnelTls,
 };
 use crate::hello::{self, Peeked, Prefixed};
+use crate::idle::{self, Protocol, Watch, Watched};
 use crate::intercept::{
     DEFAULT_PAUSE_TIMEOUT, Interceptors, Outcome, Pauses, RequestCtx, ResponseCtx,
 };
@@ -57,6 +58,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pause after a failed accept, so running out of file descriptors does not spin.
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// Client connections served at once by default ([`Config::max_clients`]). A CONNECT tunnel
+/// counts until it closes. Each connection costs a file descriptor and about 30 KB.
+pub const DEFAULT_MAX_CLIENTS: usize = 10_000;
+
+/// What a client over [`Config::max_clients`] receives before the connection is closed.
+const BUSY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\n\
+    content-type: text/plain\r\n\r\ntoo many client connections, retry later\n";
 
 /// Whether the proxy may listen on an address other hosts can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,6 +130,8 @@ pub struct Config {
     pub upstream_proxy: Option<UpstreamProxy>,
     /// Destinations that skip `upstream_proxy` (`--upstream-bypass`).
     pub upstream_bypass: Bypass,
+    /// Client connections served at once; more are answered `503` and closed.
+    pub max_clients: usize,
 }
 
 impl Config {
@@ -144,6 +155,7 @@ impl Config {
             ws: WsLimits::default(),
             upstream_proxy: None,
             upstream_bypass: Bypass::default(),
+            max_clients: DEFAULT_MAX_CLIENTS,
         }
     }
 }
@@ -190,6 +202,8 @@ pub(crate) struct State {
     ws: WsLimits,
     /// Open WebSocket connections that accept injected messages (shared with the store).
     ws_live: ws::Live,
+    /// One permit per client connection being served ([`Config::max_clients`]).
+    client_slots: Arc<Semaphore>,
 }
 
 impl State {
@@ -254,6 +268,9 @@ impl Proxy {
             passthrough: config.passthrough,
             ws: config.ws,
             ws_live: store.ws().live().clone(),
+            client_slots: Arc::new(Semaphore::new(
+                config.max_clients.clamp(1, Semaphore::MAX_PERMITS),
+            )),
         };
         Ok(Self {
             listener,
@@ -336,12 +353,12 @@ impl Proxy {
     /// Never returns: the result type is kept for callers that `?` it.
     pub async fn run(self) -> anyhow::Result<()> {
         let mut failing = None;
+        let mut full = false;
         loop {
             match self.listener.accept().await {
                 Ok((stream, peer)) => {
                     failing = None;
-                    let _ = stream.set_nodelay(true);
-                    tokio::spawn(serve_client(Arc::clone(&self.state), stream, peer));
+                    self.admit(stream, peer, &mut full);
                 }
                 Err(e) => {
                     if failing != Some(e.kind()) {
@@ -353,13 +370,43 @@ impl Proxy {
             }
         }
     }
+
+    /// Serves `stream` if a client slot is free; otherwise answers `503` and closes it,
+    /// reporting the first refusal of a run of them on stderr.
+    fn admit(&self, stream: TcpStream, peer: SocketAddr, full: &mut bool) {
+        let Ok(slot) = Arc::clone(&self.state.client_slots).try_acquire_owned() else {
+            if !*full {
+                eprintln!(
+                    "{}: too many client connections; refusing new ones until some close",
+                    crate::NAME
+                );
+                *full = true;
+            }
+            // Best effort: a full socket buffer just means the client sees the close.
+            let _ = stream.try_write(BUSY);
+            return;
+        };
+        *full = false;
+        let _ = stream.set_nodelay(true);
+        tokio::spawn(serve_client(Arc::clone(&self.state), stream, peer, slot));
+    }
 }
 
 /// Serves the plain HTTP/1.1 connection from the client: CONNECT and absolute-form requests.
-async fn serve_client(state: Arc<State>, stream: TcpStream, peer: SocketAddr) {
+/// `slot` stays held while the connection, or the tunnel it turns into, is open.
+async fn serve_client(
+    state: Arc<State>,
+    stream: TcpStream,
+    peer: SocketAddr,
+    slot: OwnedSemaphorePermit,
+) {
     let pools: Arc<Pools> = Arc::default();
+    let watch = Watch::new(Protocol::Http1);
+    let io = Watched::new(stream, Arc::clone(&watch), Some(slot));
+    let requests = Arc::clone(&watch);
     let service = service_fn(move |request: Request<Incoming>| {
         let (state, pools) = (Arc::clone(&state), Arc::clone(&pools));
+        let flight = requests.begin();
         async move {
             // An unpaired client gets no answer: the error makes hyper close the connection.
             if let Some(pairing) = &state.pairing
@@ -367,15 +414,16 @@ async fn serve_client(state: Arc<State>, stream: TcpStream, peer: SocketAddr) {
             {
                 return Err(NotPaired);
             }
-            Ok(proxy_request(state, peer, request, &pools).await)
+            let response = proxy_request(state, peer, request, &pools).await;
+            Ok(response.map(|body| flight.hold(body).boxed_unsync()))
         }
     });
-    // A client that disconnects mid-request is normal for a proxy; there is no one to tell.
-    let _ = http1::Builder::new()
+    let conn = http1::Builder::new()
         .preserve_header_case(true)
-        .serve_connection(TokioIo::new(stream), service)
-        .with_upgrades()
-        .await;
+        .serve_connection(TokioIo::new(io), service)
+        .with_upgrades();
+    // A client that disconnects mid-request is normal for a proxy; there is no one to tell.
+    let _ = watch.guard(conn).await;
 }
 
 /// Why a connection was closed without an answer.
@@ -462,7 +510,7 @@ where
     };
     let (raw, message) = match peeked {
         Peeked::Tls { raw, message } => (raw, message),
-        Peeked::Other { raw } => return pass_through(&state, peer, &host, port, raw, io).await,
+        Peeked::Other { raw } => return pass_through(state, peer, host, port, raw, io).await,
     };
     let client_hello = ClientHello::parse(&message);
     let sni = hello::sni(&client_hello);
@@ -527,24 +575,46 @@ where
         offer_h2: client_hello.alpn.iter().any(|p| p == b"h2"),
         tls: Some(client_tls),
     });
+    serve_intercepted(state, peer, target, tls, h2).await;
+}
+
+/// Serves the requests inside an intercepted TLS session, over HTTP/2 when `h2`.
+async fn serve_intercepted<S>(
+    state: Arc<State>,
+    peer: SocketAddr,
+    target: Arc<Target>,
+    tls: S,
+    h2: bool,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let pool: Arc<Pool> = Arc::default();
+    let watch = Watch::new(if h2 { Protocol::Http2 } else { Protocol::Http1 });
+    let requests = Arc::clone(&watch);
     let service = service_fn(move |request| {
         let (state, target, pool) = (Arc::clone(&state), Arc::clone(&target), Arc::clone(&pool));
-        async move { Ok::<_, Infallible>(forward(&state, peer, &target, Some(&pool), request).await) }
+        let flight = requests.begin();
+        async move {
+            let response = forward(&state, peer, &target, Some(&pool), request).await;
+            Ok::<_, Infallible>(response.map(|body| flight.hold(body).boxed_unsync()))
+        }
     });
-    let io = TokioIo::new(tls);
+    let io = TokioIo::new(Watched::new(tls, Arc::clone(&watch), None));
     // Connection errors end the tunnel; each request already logged its own outcome.
-    let _ = if h2 {
-        http2::Builder::new(TokioExecutor::new())
-            .serve_connection(io, service)
-            .await
+    if h2 {
+        let conn = http2::Builder::new(TokioExecutor::new())
+            .timer(TokioTimer::new())
+            .keep_alive_interval(idle::H2_PING_INTERVAL)
+            .keep_alive_timeout(idle::H2_PING_TIMEOUT)
+            .serve_connection(io, service);
+        let _ = watch.guard(conn).await;
     } else {
-        http1::Builder::new()
+        let conn = http1::Builder::new()
             .preserve_header_case(true)
             .serve_connection(io, service)
-            .with_upgrades()
-            .await
-    };
+            .with_upgrades();
+        let _ = watch.guard(conn).await;
+    }
 }
 
 /// The record of a tunnel that ended before anything was relayed, such as a ClientHello
@@ -569,16 +639,17 @@ fn tunnel_failure(
     })
 }
 
-/// Copies a non-TLS tunnel both ways and logs its size.
+/// Copies a non-TLS tunnel both ways and logs its size; closes it after
+/// [`idle::IDLE_TIMEOUT`] without a byte either way. Owned arguments keep the future `Send`.
 async fn pass_through<S>(
-    state: &State,
+    state: Arc<State>,
     peer: SocketAddr,
-    host: &str,
+    host: String,
     port: u16,
     raw: Vec<u8>,
-    mut io: S,
+    io: S,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut record = Tunnel {
         id: state.next_id(),
@@ -592,13 +663,16 @@ async fn pass_through<S>(
         tls: None,
         duration_ms: None,
     };
-    let result = async {
-        let mut server = upstream::open_raw(&state.connector, peer.ip(), host, port).await?;
-        server.write_all(&raw).await?;
-        let (up, down) = tokio::io::copy_bidirectional(&mut io, &mut server).await?;
-        anyhow::Ok((up, down))
-    }
-    .await;
+    let watch = Watch::new(Protocol::Relay);
+    let io = Watched::new(io, Arc::clone(&watch), None);
+    let connector = state.connector.clone();
+    let relay = relay_raw(connector, peer.ip(), (host, port), raw, io);
+    let result = watch.guard(relay).await.unwrap_or_else(|| {
+        Err(anyhow::anyhow!(
+            "closed after {} s without traffic",
+            idle::IDLE_TIMEOUT.as_secs()
+        ))
+    });
     match result {
         Ok((up, down)) => {
             record.bytes_up += up;
@@ -608,6 +682,23 @@ async fn pass_through<S>(
     }
     record.time = Utc::now().rfc3339();
     state.emit(Event::Tunnel(record));
+}
+
+/// Dials `host:port`, sends `raw` and copies both ways; returns the bytes sent up and down.
+/// Takes everything by value: a borrowed `State` would make the caller's future not `Send`.
+async fn relay_raw<S>(
+    connector: Connector,
+    peer: IpAddr,
+    (host, port): (String, u16),
+    raw: Vec<u8>,
+    mut io: S,
+) -> anyhow::Result<(u64, u64)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut server = upstream::open_raw(&connector, peer, &host, port).await?;
+    server.write_all(&raw).await?;
+    Ok(tokio::io::copy_bidirectional(&mut io, &mut server).await?)
 }
 
 /// Serves a TCP connection the WireGuard capture mode terminated, as if `peer` had sent

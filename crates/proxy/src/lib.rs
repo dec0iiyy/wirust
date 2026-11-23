@@ -26,6 +26,7 @@ mod grpc_api;
 pub mod har;
 mod har_api;
 pub mod hello;
+mod idle;
 pub mod intercept;
 pub mod logfold;
 mod magic;
