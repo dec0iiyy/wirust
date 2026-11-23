@@ -1,6 +1,6 @@
 {
     "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "description": "Single-binary HTTPS debugging proxy with a web UI: decrypts TLS with a local CA, shows each client's TLS fingerprint (JA4, JA3)",
     "homepage": "https://github.com/dec0iiyy/wirust",
     "license": "GPL-3.0-only",
@@ -11,9 +11,9 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/dec0iiyy/wirust/releases/download/v0.5.0/wirust-v0.5.0-x86_64-pc-windows-msvc.zip",
-            "hash": "0e740138b12fb9ac8246e03da439e8bd6d018c9d1f0d8dd0d5d0aae4f8d8af58",
-            "extract_dir": "wirust-v0.5.0-x86_64-pc-windows-msvc"
+            "url": "https://github.com/dec0iiyy/wirust/releases/download/v0.6.0/wirust-v0.6.0-x86_64-pc-windows-msvc.zip",
+            "hash": "dbb7cb876e83c66da81ad2650fb308e8a1abff6e74d7699fbafa43fe713e4204",
+            "extract_dir": "wirust-v0.6.0-x86_64-pc-windows-msvc"
         }
     },
     "bin": "wirust.exe",
