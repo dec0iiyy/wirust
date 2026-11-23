@@ -782,6 +782,7 @@ where
     let rules = (parts.extensions.get::<ReplayTag>()).is_none_or(|tag| tag.apply_rules);
     let intercepting = !state.interceptors.is_empty() && rules;
     let mut ctx = None;
+    let client_host = parts.headers.get(header::HOST).cloned();
     let body = if intercepting {
         let mut req = target.request_ctx(record.id, peer, &mut parts, path);
         match intercept_request(state, &mut req, &mut parts, tee, upgrade, &mut record).await {
@@ -806,6 +807,10 @@ where
     };
 
     let remapped = remap(target, ctx.as_ref(), &mut record);
+    if remapped.is_some() && parts.headers.get(header::HOST) == client_host.as_ref() {
+        // The new server's authority, as HTTP/2 gets it; a `Host` a rule set stays.
+        parts.headers.remove(header::HOST);
+    }
     let (target, pool) = remapped.as_ref().map_or((target, pool), |r| (r, None));
     let sender = match connect(state, target, pool, upgrade, &mut record.timing).await {
         Ok(sender) => sender,

@@ -235,6 +235,30 @@ action = { type = "rewrite_body", phase = "response", replace = [{ regex = "orig
 }
 
 #[tokio::test]
+async fn map_remote_sends_the_new_host_over_http1() -> TestResult {
+    let (port, log) = origin().await?;
+    let running = start(&format!(
+        r#"
+[[rules]]
+name = "remote"
+match = {{ host = "*.test" }}
+action = {{ type = "map_remote", host = "127.0.0.1", port = {port} }}
+
+[[rules]]
+name = "explicit"
+match = {{ host = "kept.test" }}
+action = {{ type = "rewrite_headers", set = {{ "host" = "chosen.test" }} }}
+"#
+    ))
+    .await?;
+    let (_, body) = get(&running, "http://app.test:1234/host").await?;
+    assert_eq!(body, format!("127.0.0.1:{port}"), "{log:?}");
+    let (_, body) = get(&running, "http://kept.test:1234/host").await?;
+    assert_eq!(body, "chosen.test", "a rule's Host stays: {log:?}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn unmatched_streams_stream_while_body_rules_exist() -> TestResult {
     let (port, _log) = origin().await?;
     let mut running = start(

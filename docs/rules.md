@@ -136,6 +136,8 @@ Order inside one exchange: all matching `delay`s (summed), then rewrites, `map_r
   1000:1 expansion cap) is left unchanged and the rule does not fire.
 - `throttle` never buffers: it releases about a tenth of a second's worth of bytes at a time.
 - `map_remote` without `port` but with `scheme` uses that scheme's default port.
+- `map_remote` and a breakpoint edit's `server` send the new server's authority: `Host` over
+  HTTP/1.1, `:authority` over HTTP/2. A `Host` set by a header rewrite is kept.
 
 ## Flow record
 
