@@ -1074,9 +1074,13 @@ async fn intercept_response(
         throttle: None,
     };
     let mut body = None;
+    let mut buffered = None;
     if state.interceptors.needs_response_body() {
         match body::buffer(incoming, state.body_limit).await? {
-            Buffered::Whole(bytes) => ctx.body = Some(bytes),
+            Buffered::Whole(bytes) => {
+                buffered = Some(bytes.clone());
+                ctx.body = Some(bytes);
+            }
             Buffered::TooLarge(rest) => {
                 ctx.flags.push(Flag::RewriteSkippedBodyTooLarge);
                 body = Some(boxed(rest));
@@ -1102,7 +1106,10 @@ async fn intercept_response(
     parts.headers = ctx.headers;
     let body = match ctx.body {
         Some(bytes) => {
-            set_length(&mut parts.headers, bytes.len());
+            // An unchanged body keeps its length; HEAD, 204 and 304 describe a body never sent.
+            if buffered.as_ref() != Some(&bytes) && !bodiless(&request.method, parts.status) {
+                set_length(&mut parts.headers, bytes.len());
+            }
             full(bytes)
         }
         None => body.unwrap_or_else(empty),
@@ -1165,6 +1172,15 @@ fn magic_response<B>(state: &State, peer: SocketAddr, request: &Request<B>) -> R
     .into_parts();
     parts.version = request.version();
     Response::from_parts(parts, full(bytes))
+}
+
+/// Whether a response to `method` with `status` carries no body, so its `Content-Length`
+/// describes the representation rather than the bytes that follow (RFC 9110, 8.6).
+fn bodiless(method: &http::Method, status: StatusCode) -> bool {
+    method == http::Method::HEAD
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
 }
 
 fn set_length(headers: &mut HeaderMap, len: usize) {

@@ -197,3 +197,38 @@ action = { type = "block", status = 451 }
     assert_eq!((status, body.as_str()), (StatusCode::OK, "from origin"));
     Ok(())
 }
+
+#[tokio::test]
+async fn bodiless_responses_keep_their_length_under_body_rules() -> TestResult {
+    let (port, _log) = origin().await?;
+    let running = start(
+        r#"
+[[rules]]
+name = "edit"
+action = { type = "rewrite_body", phase = "response", replace = [{ regex = "origin", with = "the rule" }] }
+"#,
+    )
+    .await?;
+    let length = |response: &http::Response<_>| {
+        let value = response.headers().get("content-length");
+        value.and_then(|v| v.to_str().ok()).map(str::to_owned)
+    };
+    let url = |path: &str| format!("http://127.0.0.1:{port}{path}");
+    let head = send(&running, Method::HEAD, &url("/head"), &[]).await?;
+    assert_eq!(length(&head).as_deref(), Some("1000"), "{head:?}");
+    let none = send(&running, Method::GET, &url("/204"), &[]).await?;
+    assert_eq!(none.status(), StatusCode::NO_CONTENT);
+    assert_eq!(length(&none), None, "{none:?}");
+    let same = send(&running, Method::GET, &url("/304"), &[]).await?;
+    assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+    // hyper's server never writes `Content-Length` on a 304, with or without rules; the
+    // proxy must not invent a `0` either.
+    assert_ne!(length(&same).as_deref(), Some("0"), "{same:?}");
+    assert!(same.headers().contains_key("etag"), "{same:?}");
+    // A body the rule changes gets its new length.
+    let changed = send(&running, Method::GET, &url("/plain"), &[]).await?;
+    assert_eq!(length(&changed).as_deref(), Some("13"), "{changed:?}");
+    let body = changed.into_body().collect().await?.to_bytes();
+    assert_eq!(&body[..], b"from the rule");
+    Ok(())
+}
