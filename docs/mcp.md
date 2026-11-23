@@ -75,7 +75,7 @@ Read-only, always offered:
 | Tool | Arguments | Result |
 |---|---|---|
 | `list_flows` | `query?`, `limit?` (1 to 200, default 50), `offset?` | compact rows, newest first: id, state, type, method, URL (300 characters at most), status, `ms`, `response_bytes`, `tls_client`, error, flags; `more` when older rows exist |
-| `get_flow` | `id`, `parts?` (`request`, `response`, `bodies`, `tls`, `timing`; default request, response, timing), `max_body_bytes?` (default 8192, at most 65536) | the head and the parts asked for. Text bodies are shown decoded and cut at `max_body_bytes` with `truncated`; binary bodies as `hex_preview` (64 bytes) and `base64_preview`. `captured_truncated` says the proxy itself kept only part of the body (`--body-limit`) |
+| `get_flow` | `id`, `parts?` (`request`, `response`, `bodies`, `tls`, `timing`; default request, response, timing), `max_body_bytes?` (default 8192, at most 65536) | the head and the parts asked for. Text bodies are shown decoded and cut at `max_body_bytes` with `truncated`. A binary body is shown as `binary body, N bytes, not shown while redaction is on`; only with `--no-redact` as `hex_preview` (64 bytes) and `base64_preview`. `captured_truncated` says the proxy itself kept only part of the body (`--body-limit`) |
 | `search_flows` | `query`, `limit?` (default 20) | ids with a one-line snippet (`METHOD URL -> STATUS`) and the first 160 characters of a text response body |
 | `get_tls_client` | `id` | JA4, JA3 hash, SNI, ALPN, TLS version and the known client name; for a failed handshake the JA4 and the reason |
 | `get_websocket_messages` | `id`, `after?`, `limit?` (default 50) | the messages of `GET /api/v1/flows/{id}/messages` |
@@ -83,8 +83,8 @@ Read-only, always offered:
 | `export_har` | `query?`, `limit?` (1 to 500, default 50) | the HAR 1.2 document as a JSON string |
 | `proxy_status` | none | version, proxy address, whether it listens on loopback, CA fingerprint, number of flows held, rule counts, number of scripts, whether redaction and write tools are on |
 | `list_rules` | none | the rules with their enabled state; a map-local `path` is shown by file name only |
-| `generate_code` | `id`, `language` (`python`, `fetch`, `okhttp`, `urlsession`, `httpie`, `powershell`) | code that sends the request again |
-| `get_curl` | `id` | a curl command that sends the request again |
+| `generate_code` | `id`, `language` (`python`, `fetch`, `okhttp`, `urlsession`, `httpie`, `powershell`) | code that sends the request again, built from the redacted flow |
+| `get_curl` | `id` | a curl command that sends the request again, built from the redacted flow |
 
 `query` is the wirust search language of the UI's search box, such as
 `host:api.example.com status:5xx method:POST` ([ui.md](ui.md),
@@ -135,31 +135,84 @@ reads like an instruction to the agent (prompt injection). `wirust mcp` treats i
 
 ## Redaction
 
-With redaction on (the default) these values are replaced before a result leaves the
-process:
+With redaction on (the default) one redaction pass runs over each flow as it arrives from
+the control plane, before any tool builds its result from it: `list_flows`, `get_flow`,
+`search_flows`, `get_tls_client`, `get_curl` and `generate_code` all work from the redacted
+flow. `get_curl` and `generate_code` are generated inside `wirust mcp` from that flow, so a
+secret never reaches the code generator, where quoting (`'\''`, `\\`) could break it up.
+`export_har`, `get_websocket_messages`, `get_grpc` and `list_rules` get the same rules over
+their own data.
 
-- Header values whose name holds a secret word: `Authorization`, `Proxy-Authorization`,
-  `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, `X-CSRF-Token` and the like, as
-  `[redacted: secret header]`.
-- Query parameters (and form-encoded body parameters) with such a name, such as `token`,
-  `api_key`, `client_secret`, `password`, `signature`, `session`, `auth`, as
-  `[redacted: secret query parameter]`.
-- JSON fields with such a name, at any depth, in bodies and in HAR `{"name", "value"}`
-  entries, as `[redacted: secret field]`.
-- JWT-looking strings anywhere (three base64url segments starting with `eyJ`), as
-  `[redacted: jwt]`.
-- In `get_curl` and `generate_code`, the literal values of the flow's secret headers, cookie
-  values, secret query parameters and secret JSON body fields, as `[redacted]`.
+What is replaced:
 
-A name is secret when one of its words (split at `-`, `_`, `.` and lower-to-upper case
-changes) is one of: token, key, apikey, secret, password, passwd, pwd, signature, sig,
-session, sessionid, sid, auth, authorization, authentication, jwt, cookie, cookies,
-credential, credentials, csrf, xsrf, otp. So `X-Api-Key` and `apiKey` are secret, `author`
-and `keyword` are not.
+- Header values whose name is secret (below). `Authorization`, `Proxy-Authorization` and
+  other secret headers keep their scheme: `Bearer [redacted: secret header]`, also for
+  Basic, Digest and custom schemes; a value without a scheme becomes
+  `[redacted: secret header]`. `Cookie` keeps the cookie names
+  (`sid=[redacted: cookie]; theme=[redacted: cookie]`); `Set-Cookie` keeps its name and
+  attributes. Other headers (`Referer`, `Location`, `Origin` and the rest) go through the
+  text pass.
+- `name=value` pairs with a secret name anywhere in text: query strings, fragments, form
+  bodies, URLs inside header values and bodies, as `[redacted: secret query parameter]`.
+  Names are `%`-decoded before matching. A value that, `%`-decoded, holds a secret itself
+  (`next=https%3A%2F%2Fh%2F%3Ftoken%3D...`) is replaced whole.
+- Bodies, by content type and shape:
+  - JSON is parsed: every field with a secret name, at any depth, is replaced as
+    `[redacted: secret field]` (whole objects and arrays too), as are `[name, value]` pairs
+    and `{"name": ..., "value": ...}` objects with a secret name. Every string is read
+    again as text, so JSON inside a JSON string (a WebSocket message, a `payload` field) is
+    parsed and redacted too, up to 6 levels deep. Numeric usage counts such as
+    `"max_tokens": 100` are kept.
+  - `application/x-www-form-urlencoded`, and any text shaped like `a=1&b=2` (also with a
+    trailing newline), pair by pair.
+  - `multipart/*`: a part whose `name` is secret loses its content; other parts go through
+    the text pass.
+  - Any other text, and JSON that does not parse (cut by `--body-limit`, say), goes through
+    a pattern pass: `"name": value` and `name=value` pairs, `Name: value` lines, a
+    credential after `Bearer`, `Basic`, `Digest` or `Token`, and a long opaque value right
+    after a secret name.
+  - A body that is not UTF-8 text (binary, or a compressed body wirust could not decode)
+    and a binary WebSocket message are not shown at all:
+    `[redacted: binary body, N bytes, not shown while redaction is on]`.
+- JWTs anywhere, also unsigned ones (`eyJ...eyJ....` with an empty signature) and
+  five-part JWE, as `[redacted: jwt]`.
 
-Redaction is a safety net, not a guarantee: a secret under an unusual name, in a binary body
-or inside free text is passed on. `--no-redact` turns it off, and every tool description then
-says "Redaction is OFF".
+A name is secret when, lowercased and stripped of `-`, `_`, `.`, `[`, `]` and spaces, it:
+
+- contains one of token, secret, password, passwd, passphrase, passcode, pwd, credential,
+  authorization, authentication, apikey, privatekey, secretkey, accesskey, signingkey,
+  clientkey, masterkey, sessionkey, encryptionkey, subscriptionkey, licensekey, sessionid,
+  sessid, signature, cookie, jwt, bearer, csrf, xsrf; or
+- has, split into words at `-`, `_`, `.` and lower-to-upper case changes, a word that is
+  key, auth, session, sid, sig, otp or pass, a word ending in auth, otp or sig, or a word
+  starting with auth but not with author.
+
+So `accesstoken`, `ACCESSTOKEN`, `refreshtoken`, `X-CSRFToken`, `privatekey`, `apikey`,
+`clientsecret`, `user[password]`, `PHPSESSID`, `X-Api-Key`, `key`, `totp`, `oauth` and
+`authCode` are secret, while `author`, `authority`, `keyboard`, `keyword`, `monkey`,
+`hotkey`, `design`, `signal` and `sidebar` are not. Bare `key` counts (it is the API key
+parameter of several public APIs); `key` inside a longer word counts only in the compounds
+listed above.
+
+The pass is idempotent (running it twice changes nothing), reads at most 1 MiB of one text
+(the rest is replaced by a note) and fails closed: binary bodies, text nested deeper than 6
+levels and text past the cap are hidden, not passed on. It uses only the `regex` crate,
+whose matching time is linear in the input.
+
+### Limits of redaction
+
+Redaction is a best-effort filter, not a guarantee:
+
+- A secret under an innocuous name (`{"note": "my key is ..."}`, `?q=...`), or in free text
+  without a name next to it, passes.
+- Formats it does not parse are only covered by the pattern pass: XML, protobuf and gRPC
+  payloads without field names, custom encodings.
+- Turning it off with `--no-redact` (every tool description then says "Redaction is OFF")
+  hands everything over as captured, binary bodies as base64.
+
+Treat the agent as having read the body whenever `--no-redact` is on or the body is in a
+format the list above does not name, and do not point it at traffic you could not show to
+the model provider.
 
 ## Protocol
 

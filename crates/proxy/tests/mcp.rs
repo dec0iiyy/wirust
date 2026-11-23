@@ -291,6 +291,172 @@ async fn read_only_tools_frame_and_redact_captured_traffic() -> TestResult {
     Ok(())
 }
 
+/// Sends a plain-HTTP request with exactly `headers` and `body` and waits for its flow.
+async fn send(
+    setup: &mut Setup,
+    path_and_query: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> anyhow::Result<u64> {
+    let tcp = TcpStream::connect(setup.proxy.addr).await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(connection);
+    let port = setup.upstream;
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("http://127.0.0.1:{port}{path_and_query}"))
+        .header("host", format!("127.0.0.1:{port}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    sender
+        .send_request(request.body(Full::new(Bytes::from(body)))?)
+        .await?
+        .into_body()
+        .collect()
+        .await?;
+    Ok(next_exchange(&mut setup.proxy.events).await?.id)
+}
+
+/// Every text an agent can get about flow `id` from the read-only tools.
+fn every_view(mcp: &mut Mcp, id: u64) -> anyhow::Result<Vec<(String, String)>> {
+    let mut views = Vec::new();
+    let mut calls = vec![
+        (
+            "get_flow".to_owned(),
+            json!({ "id": id, "parts": ["request", "response", "bodies", "tls", "timing"] }),
+        ),
+        ("get_curl".to_owned(), json!({ "id": id })),
+        ("list_flows".to_owned(), json!({})),
+        ("search_flows".to_owned(), json!({ "query": "method:POST" })),
+        ("export_har".to_owned(), json!({})),
+    ];
+    for language in [
+        "python",
+        "fetch",
+        "okhttp",
+        "urlsession",
+        "httpie",
+        "powershell",
+    ] {
+        calls.push((
+            format!("generate_code {language}"),
+            json!({ "id": id, "language": language }),
+        ));
+    }
+    for (label, args) in calls {
+        let tool = label.split(' ').next().unwrap_or_default().to_owned();
+        let (text, data) = mcp.tool(&tool, args)?;
+        views.push((label, format!("{text}\n{data}")));
+    }
+    Ok(views)
+}
+
+fn assert_hidden(views: &[(String, String)], secrets: &[&str]) {
+    for (label, text) in views {
+        for secret in secrets {
+            assert!(!text.contains(secret), "{label}: {secret} leaked: {text}");
+        }
+    }
+}
+
+const UNSIGNED_JWT: &str = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1bnNpZ25lZCJ9.";
+
+/// The leaks of the review (items 19 to 24) and the audit (F3): each secret is a unique
+/// marker that no tool may show while redaction is on.
+#[tokio::test(flavor = "multi_thread")]
+async fn redaction_closes_the_known_leaks() -> TestResult {
+    use std::io::Write as _;
+    let mut setup = setup().await?;
+    let mut ids = Vec::new();
+    let form = &[("content-type", "application/x-www-form-urlencoded")];
+    ids.push(
+        send(
+            &mut setup,
+            "/echo",
+            form,
+            b"user=ann&password=LEAKFORM1\n".to_vec(),
+        )
+        .await?,
+    );
+    ids.push(
+        send(
+            &mut setup,
+            "/echo",
+            &[],
+            b"password=LEAKFORM2&user=x".to_vec(),
+        )
+        .await?,
+    );
+    let json_body = r#"{"user":"ann","list":[{"accesstoken":"LEAKJ1"}],"ACCESSTOKEN":"LEAKJ2",
+        "refreshtoken":"LEAKJ3","privatekey":"LEAKJ4","apikey":"LEAKJ5","clientsecret":"LEAKJ6",
+        "payload":"{\"password\":\"LEAKJ7\"}","password":"LEAKQ8'x\\y\nz","n":[[{"pwd":"LEAKJ9"}]]}"#;
+    let json_type = &[("content-type", "application/json")];
+    ids.push(
+        send(
+            &mut setup,
+            "/echo",
+            json_type,
+            json_body.as_bytes().to_vec(),
+        )
+        .await?,
+    );
+    let headers = &[
+        ("x-csrftoken", "LEAKH1"),
+        (
+            "proxy-authorization",
+            "Digest username=\"u\", response=\"LEAKH2\"",
+        ),
+        ("authorization", "Custom LEAKH3"),
+        ("cookie", "a=LEAKC1; b=LEAKC2"),
+        ("referer", "https://a.test/p?access_token=LEAKR1&page=2"),
+        (
+            "x-return-to",
+            "https://a.test/p?next=https%3A%2F%2Fb.test%2F%3Ftoken%3DLEAKR2",
+        ),
+        ("x-trace", UNSIGNED_JWT),
+        ("x-accesstoken", "LEAKH4"),
+    ];
+    let query = "/echo?accesstoken=LEAKU1&next=https%3A%2F%2Fb%2F%3Fapi_key%3DLEAKU2&page=3";
+    ids.push(send(&mut setup, query, headers, b"plain".to_vec()).await?);
+    let binary = b"password=LEAKB1&x=\xff\xfe\x00".to_vec();
+    let binary_b64 = base64_of(&binary);
+    ids.push(send(&mut setup, "/echo", &[], binary.clone()).await?);
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gzip.write_all(br#"{"password":"LEAKG1","user":"ann"}"#)?;
+    let gzipped = gzip.finish()?;
+    let gzip_b64 = base64_of(&gzipped);
+    let gzip_headers = &[
+        ("content-type", "application/json"),
+        ("content-encoding", "gzip"),
+    ];
+    ids.push(send(&mut setup, "/echo", gzip_headers, gzipped).await?);
+
+    let mut mcp = Mcp::start(&setup, &[])?;
+    // Every marker starts with LEAK, so no output may contain LEAK at all.
+    let secrets = ["LEAK", UNSIGNED_JWT, &binary_b64, &gzip_b64];
+    for id in &ids {
+        let views = every_view(&mut mcp, *id)?;
+        assert_hidden(&views, &secrets);
+    }
+    let (text, _) = mcp.tool("get_flow", json!({ "id": ids[2], "parts": ["bodies"] }))?;
+    assert!(text.contains("ann"), "non-secret fields stay: {text}");
+    let (text, _) = mcp.tool("get_flow", json!({ "id": ids[4], "parts": ["bodies"] }))?;
+    assert!(text.contains("not shown while redaction is on"), "{text}");
+    assert!(!text.contains("hex_preview"), "{text}");
+
+    // --no-redact keeps the binary previews as they were.
+    let mut raw = Mcp::start(&setup, &["--no-redact"])?;
+    let (text, _) = raw.tool("get_flow", json!({ "id": ids[4], "parts": ["bodies"] }))?;
+    assert!(text.contains(&binary_b64), "{text}");
+    Ok(())
+}
+
+fn base64_of(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn no_redact_and_truncation() -> TestResult {
     let mut setup = setup().await?;

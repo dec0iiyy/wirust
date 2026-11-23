@@ -48,7 +48,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "get_flow",
-        description: "Show one flow: its head, and the parts asked for: request, response, bodies, tls, timing (default: request, response, timing). Text bodies are decoded; binary bodies are summarised as hex and base64 previews; long bodies are cut and marked truncated.",
+        description: "Show one flow: its head, and the parts asked for: request, response, bodies, tls, timing (default: request, response, timing). Text bodies are decoded; binary bodies are hidden while redaction is on (hex and base64 previews with --no-redact); long bodies are cut and marked truncated.",
         schema: schema_get_flow,
         writes: false,
     },
@@ -361,13 +361,11 @@ async fn run(server: &Server, name: &str, args: &Map<String, Value>) -> ToolResu
     }
 }
 
-/// A result framed as untrusted traffic: the notice, then the redacted data between
-/// markers with a random nonce, so captured text cannot fake the end marker.
-fn captured(server: &Server, mut data: Value) -> Value {
+/// A result framed as untrusted traffic: the notice, then the data between markers with a
+/// random nonce, so captured text cannot fake the end marker. Each tool redacts its data at
+/// the source (the flow, the HAR document, the messages) before it builds the result.
+fn captured(server: &Server, data: Value) -> Value {
     let redacted = server.options.redaction == Redaction::On;
-    if redacted {
-        redact::json(&mut data);
-    }
     let nonce = nonce();
     let body = serde_json::to_string_pretty(&data).unwrap_or_default();
     let (body, truncated) = cap(&body, server.options.max_output);
@@ -508,11 +506,27 @@ async fn flows(server: &Server, query: Option<&str>, limit: u64) -> Result<Vec<V
     let list = get_json(server, &path).await?;
     let mut rows = list.as_array().cloned().unwrap_or_default();
     rows.reverse();
+    for stored in &mut rows {
+        redacted(server, stored);
+    }
     Ok(rows)
 }
 
+/// One stored flow (`{"state", "flow"}`), redacted unless `--no-redact`.
 async fn flow(server: &Server, id: u64) -> Result<Value, String> {
-    get_json(server, &format!("/api/v1/flows/{id}")).await
+    let mut stored = get_json(server, &format!("/api/v1/flows/{id}")).await?;
+    redacted(server, &mut stored);
+    Ok(stored)
+}
+
+/// The one redaction pass over a stored flow; every tool output about a flow is built
+/// from its result.
+fn redacted(server: &Server, stored: &mut Value) {
+    if server.options.redaction == Redaction::On
+        && let Some(record) = stored.get_mut("flow")
+    {
+        redact::flow(record);
+    }
 }
 
 /// A compact row of a stored flow (`{"state", "flow"}`).
@@ -584,7 +598,6 @@ async fn search_flows(server: &Server, args: &Map<String, Value>) -> ToolResult 
     let query = text(args, "query")?.ok_or("query is required")?;
     let limit = uint(args, "limit")?.unwrap_or(20).clamp(1, MAX_ROWS);
     let found = flows(server, Some(query), limit).await?;
-    let redacting = server.options.redaction == Redaction::On;
     let hits: Vec<Value> = found
         .iter()
         .map(|stored| {
@@ -593,14 +606,11 @@ async fn search_flows(server: &Server, args: &Map<String, Value>) -> ToolResult 
             let head = format!(
                 "{} {} -> {}",
                 f["method"].as_str().or(f["type"].as_str()).unwrap_or("?"),
-                if redacting { redact::url(target) } else { target.to_owned() },
+                target,
                 f["status"].as_u64().map_or_else(|| "-".to_owned(), |s| s.to_string()),
             );
             let body = f["response_body"]["data"].as_str().filter(|_| f["response_body"]["encoding"] == "utf8");
-            let preview: Option<String> = body.map(|b| {
-                let shown = if redacting { redact::body_text(b) } else { b.to_owned() };
-                shown.chars().take(160).collect()
-            });
+            let preview: Option<String> = body.map(|b| b.chars().take(160).collect());
             json!({ "id": f["id"], "snippet": head.chars().take(ROW_URL_CHARS).collect::<String>(), "body_start": preview })
         })
         .collect();
@@ -609,7 +619,8 @@ async fn search_flows(server: &Server, args: &Map<String, Value>) -> ToolResult 
     ))
 }
 
-/// A body record shown to the agent: text decoded and cut, binary as previews.
+/// A body record shown to the agent: text cut, binary as previews (only with
+/// `--no-redact`: the redaction pass has replaced binary bodies by a note already).
 fn body(record: &Value, max: u64, redaction: Redaction) -> Value {
     if record.is_null() {
         return Value::Null;
@@ -621,7 +632,13 @@ fn body(record: &Value, max: u64, redaction: Redaction) -> Value {
         "captured_truncated": record["truncated"],
         "content_encoding": record["content_encoding"],
     });
-    if record["encoding"] == "base64" {
+    if record["encoding"] == "base64" && redaction == Redaction::On {
+        // Not reached after the flow pass; fail closed should a record slip through.
+        shown["text"] = json!(redact::binary_note(
+            record["size"].as_u64().unwrap_or_default()
+        ));
+        shown["truncated"] = json!(false);
+    } else if record["encoding"] == "base64" {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data)
             .unwrap_or_default();
@@ -633,11 +650,7 @@ fn body(record: &Value, max: u64, redaction: Redaction) -> Value {
             json!(base64::engine::general_purpose::STANDARD.encode(&bytes[..cut]));
         shown["truncated"] = json!(cut < bytes.len());
     } else {
-        let redacted = match redaction {
-            Redaction::On => redact::body_text(data),
-            Redaction::Off => data.to_owned(),
-        };
-        let (cut, truncated) = cap(&redacted, max);
+        let (cut, truncated) = cap(data, max);
         shown["text"] = json!(cut);
         shown["truncated"] = json!(truncated);
     }
@@ -714,14 +727,20 @@ async fn websocket(server: &Server, args: &Map<String, Value>) -> ToolResult {
     if let Some(after) = uint(args, "after")? {
         let _ = write!(path, "&after={after}");
     }
-    Ok(Output::Captured(get_json(server, &path).await?))
+    let mut page = get_json(server, &path).await?;
+    if server.options.redaction == Redaction::On {
+        redact::ws_messages(&mut page);
+    }
+    Ok(Output::Captured(page))
 }
 
 async fn grpc(server: &Server, args: &Map<String, Value>) -> ToolResult {
     let id = flow_id(args)?;
-    Ok(Output::Captured(
-        get_json(server, &format!("/api/v1/flows/{id}/grpc")).await?,
-    ))
+    let mut call = get_json(server, &format!("/api/v1/flows/{id}/grpc")).await?;
+    if server.options.redaction == Redaction::On {
+        redact::value(&mut call);
+    }
+    Ok(Output::Captured(call))
 }
 
 async fn export_har(server: &Server, args: &Map<String, Value>) -> ToolResult {
@@ -732,25 +751,10 @@ async fn export_har(server: &Server, args: &Map<String, Value>) -> ToolResult {
     }
     let mut har = get_json(server, &path).await?;
     if server.options.redaction == Redaction::On {
-        redact::json(&mut har);
-        redact_har_bodies(&mut har);
+        redact::har(&mut har);
     }
     let text = serde_json::to_string(&har).map_err(|e| e.to_string())?;
     Ok(Output::Captured(json!({ "har": text })))
-}
-
-/// HAR body texts (`postData.text`, `content.text`) through the body redaction.
-fn redact_har_bodies(har: &mut Value) {
-    let Some(entries) = har["log"]["entries"].as_array_mut() else {
-        return;
-    };
-    for entry in entries {
-        for pointer in ["/request/postData/text", "/response/content/text"] {
-            if let Some(Value::String(text)) = entry.pointer_mut(pointer) {
-                *text = redact::body_text(text);
-            }
-        }
-    }
 }
 
 async fn status(server: &Server) -> ToolResult {
@@ -791,70 +795,43 @@ fn rules_shown(report: &Value) -> Value {
 async fn list_rules(server: &Server) -> ToolResult {
     let report = get_json(server, "/api/v1/rules").await?;
     // Rules can carry captured values (header rewrites, mock bodies): framed and redacted.
+    let mut rules = rules_shown(&report);
+    if server.options.redaction == Redaction::On {
+        redact::value(&mut rules);
+    }
     Ok(Output::Captured(
-        json!({ "rules": rules_shown(&report), "load_error": !report["error"].is_null() }),
+        json!({ "rules": rules, "load_error": !report["error"].is_null() }),
     ))
 }
 
+/// `get_curl` and `generate_code`, built here from the flow after the redaction pass, so
+/// no secret reaches the generator to be escaped past a later text replacement.
 async fn generated(server: &Server, name: &str, args: &Map<String, Value>) -> ToolResult {
     let id = flow_id(args)?;
-    let path = if name == "get_curl" {
-        format!("/api/v1/flows/{id}/curl")
+    let lang = if name == "get_curl" {
+        None
     } else {
         let language = text(args, "language")?.ok_or("language is required")?;
-        format!("/api/v1/flows/{id}/code?lang={}", escape(language))
+        let lang = crate::codegen::Lang::parse(language).ok_or_else(|| {
+            let names: Vec<&str> = crate::codegen::Lang::ALL.iter().map(|l| l.id()).collect();
+            format!("language must be one of {}", names.join(", "))
+        })?;
+        Some(lang)
     };
-    let reply = server
-        .api
-        .call(Method::GET, &path, None)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    if reply.status != StatusCode::OK {
-        return Err(api_error(&reply));
+    let stored = flow(server, id).await?;
+    if stored["state"] != "done" {
+        return Err("the exchange is still running".to_owned());
     }
-    let mut code = String::from_utf8_lossy(&reply.body).into_owned();
-    if server.options.redaction == Redaction::On {
-        let stored = flow(server, id).await?;
-        let headers: Vec<(String, String)> =
-            serde_json::from_value(stored["flow"]["request_headers"].clone()).unwrap_or_default();
-        let secrets =
-            redact::literal_secrets(&headers, stored["flow"]["url"].as_str().unwrap_or(""));
-        code = redact::text_with(&code, &secrets);
-        if let Some(text) = stored["flow"]["request_body"]["data"].as_str() {
-            code = redact_body_secrets(&code, text);
-        }
-    }
+    let exchange: crate::flow::Exchange = match stored["flow"].get("type").and_then(Value::as_str) {
+        None | Some("exchange") => serde_json::from_value(stored["flow"].clone())
+            .map_err(|_| "the flow is not an HTTP exchange".to_owned())?,
+        Some(_) => return Err("the flow is not an HTTP exchange".to_owned()),
+    };
+    let code = match lang {
+        None => crate::curl::command(&exchange) + "\n",
+        Some(lang) => crate::codegen::generate(lang, &exchange),
+    };
     Ok(Output::Captured(json!({ "code": code })))
-}
-
-/// Replaces the secret field values of a JSON or form request body wherever `code` repeats
-/// them.
-fn redact_body_secrets(code: &str, body: &str) -> String {
-    let mut secrets = Vec::new();
-    if let Ok(value) = serde_json::from_str::<Value>(body) {
-        collect_secret_values(&value, &mut secrets);
-    }
-    secrets.retain(|s: &String| s.len() >= 4);
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    redact::text_with(code, &secrets)
-}
-
-fn collect_secret_values(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            for (key, field) in map {
-                match field {
-                    Value::String(s) if redact::is_secret_name(key) => out.push(s.clone()),
-                    Value::Number(n) if redact::is_secret_name(key) => out.push(n.to_string()),
-                    _ => collect_secret_values(field, out),
-                }
-            }
-        }
-        Value::Array(items) => items
-            .iter()
-            .for_each(|item| collect_secret_values(item, out)),
-        _ => {}
-    }
 }
 
 // ---- write tools --------------------------------------------------------------------------
