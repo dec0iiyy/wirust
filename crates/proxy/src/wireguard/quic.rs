@@ -25,6 +25,7 @@ use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Incoming, UdpPoller};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use super::server::udp_packet;
 use crate::flow::ClientTls;
@@ -114,7 +115,8 @@ async fn accept(endpoint: Endpoint, state: Arc<State>) {
     }
 }
 
-/// Completes the handshake and serves the connection's requests, each on its own task.
+/// Completes the handshake and serves the connection's requests, each on its own task;
+/// returns when the connection and all its requests are done.
 async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incoming) {
     let Ok(Ok(connection)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await else {
         return;
@@ -148,15 +150,22 @@ async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incomin
     let Ok(mut h3) = h3::server::Connection::<_, Bytes>::new(quic).await else {
         return;
     };
-    // A closed connection or a protocol error ends it; each request logged its own outcome.
+    let mut requests = JoinSet::new();
+    // A GOAWAY, a closed connection or a protocol error ends it; each request logged its own
+    // outcome.
     while let Ok(Some(resolver)) = h3.accept().await {
-        tokio::spawn(serve_request(
+        while requests.try_join_next().is_some() {}
+        requests.spawn(serve_request(
             Arc::clone(&state),
             Arc::clone(&client),
             peer,
             resolver,
         ));
     }
+    // Dropping `h3` closes the connection: requests still in flight (after a GOAWAY) finish
+    // first.
+    while requests.join_next().await.is_some() {}
+    drop(h3);
 }
 
 /// Serves one request stream: the body streams up while the request is forwarded, and the
