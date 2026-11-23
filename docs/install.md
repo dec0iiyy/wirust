@@ -53,7 +53,7 @@ cargo build --release      # Rust 1.88+, a C compiler
 Download `SHA256SUMS` next to the file. With the GitHub CLI:
 
 ```powershell
-gh release download v0.4.0 -R dec0iiyy/wirust -p SHA256SUMS -p wirust-windows-x86_64.exe
+gh release download v0.5.0 -R dec0iiyy/wirust -p SHA256SUMS -p wirust-windows-x86_64.exe
 ```
 
 **Checksum.** The checksum shows that the file is intact.
