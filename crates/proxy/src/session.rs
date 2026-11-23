@@ -61,13 +61,16 @@ pub enum Existing {
 }
 
 impl SessionWriter {
-    /// Opens `path` for appending, creating it with mode 0600 on unix.
+    /// Opens `path` for appending, creating it with mode 0600 on unix. An existing file
+    /// readable by others is narrowed to 0600 with a warning on stderr; a symbolic link at
+    /// `path` is refused.
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be opened, or exists and `existing` is
-    /// [`Existing::Refuse`].
+    /// Fails when `path` is a symbolic link, the file cannot be opened or narrowed, or it
+    /// exists and `existing` is [`Existing::Refuse`].
     pub fn create(path: &Path, existing: Existing) -> io::Result<Self> {
+        crate::private_file::refuse_symlink(path)?;
         let mut options = OpenOptions::new();
         match existing {
             Existing::Append => options.append(true).create(true),
@@ -78,8 +81,16 @@ impl SessionWriter {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
+        let file = options.open(path)?;
+        if crate::private_file::narrow_to_owner(&file)? {
+            eprintln!(
+                "{}: warning: {} was open to other users; narrowed it to mode 0600",
+                crate::NAME,
+                path.display()
+            );
+        }
         Ok(Self {
-            file: BufWriter::new(options.open(path)?),
+            file: BufWriter::new(file),
         })
     }
 
@@ -393,6 +404,25 @@ mod tests {
             serde_json::to_value(&session.flows[0])?,
             serde_json::to_value(flow(1))?
         );
+        std::fs::remove_dir_all(dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_wider_file_is_narrowed_and_a_symlink_refused() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir("narrow");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, "")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        drop(SessionWriter::create(&path, Existing::Append)?);
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.join("link.jsonl");
+        std::os::unix::fs::symlink(&path, &link)?;
+        assert!(SessionWriter::create(&link, Existing::Append).is_err());
         std::fs::remove_dir_all(dir)
     }
 
