@@ -296,8 +296,9 @@ pub fn export_har(
     out: &Path,
 ) -> anyhow::Result<usize> {
     let (flows, ws) = load(session, filter)?;
-    let har = crate::har::to_har_with_ws(&flows, Some(&ws));
-    let entries = har.log.entries.len();
+    // Each entry is built while it is written, so the document never sits in memory whole.
+    let har = crate::har::StreamedHar::new(&flows, Some(&ws));
+    let entries = har.entries();
     if out == Path::new("-") {
         let mut stdout = io::stdout().lock();
         serde_json::to_writer_pretty(&mut stdout, &har)?;

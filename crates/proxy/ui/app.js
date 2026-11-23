@@ -50,9 +50,9 @@ async function apiJson(path, init) {
   return body;
 }
 
-/** Server-side search with the query language (`GET /api/v1/flows?q=`). */
+/** Server-side search with the query language (`GET /api/v1/flows?q=`), answered as summaries. */
 function serverQuery(q) {
-  return apiJson("flows?q=" + encodeURIComponent(q));
+  return apiJson("flows?q=" + encodeURIComponent(q) + "&view=summary");
 }
 
 /** Extension points for panels.js: pause events, (re)loads, the shown flow. */
@@ -164,9 +164,13 @@ function tlsOf(f) {
   return tls;
 }
 
-/** Normalises a stored flow (`{state, flow}`) or an SSE payload into a row model. */
+/**
+ * Normalises a stored flow (`{state, flow}`) or an SSE payload into a row model. The list
+ * loads summaries (`?view=summary`: no headers, no bodies); `full` says whether `raw` is the
+ * whole record, which the selected flow gets from `GET /api/v1/flows/{id}`.
+ */
 function model(state, f) {
-  const m = { id: f.id, state, raw: f, search: null };
+  const m = { id: f.id, state, raw: f, search: null, full: !f.summary };
   // A rule that fires in both phases (a breakpoint on request and response) is listed once.
   m.rules = [...new Set((f.flags || []).filter((x) => x.startsWith("rule:")).map((x) => x.slice(5)))];
   m.time = clock(f.time);
@@ -188,7 +192,7 @@ function model(state, f) {
     m.error = f.error || null;
     m.size = f.response_body ? f.response_body.size : null;
     m.duration = f.timing ? f.timing.total_ms : null;
-    m.type = kindOf(header(f.response_headers, "content-type"));
+    m.type = kindOf(f.summary ? f.response_content_type || "" : header(f.response_headers, "content-type"));
   } else if (f.type === "tls_failure") {
     m.kind = "tls_failure";
     m.method = "TLS";
@@ -235,9 +239,95 @@ function upsert(state, f) {
   if (f.id <= clearedBelow) return;
   const old = flows.get(f.id);
   if (old && old.state === "done" && state === "pending") return;
+  if (f.summary && old && old.full) {
+    // A reload after a lag repeats the summary: keep the whole record already here.
+    if (old.state === state) return;
+    // The shown flow changed state: keep it on screen until its new record arrives.
+    if (f.id === selectedId) {
+      const fallBack = () => {
+        const now = flows.get(f.id);
+        if (now && now.state !== state && now.state !== "done") { flows.set(f.id, model(state, f)); markDirty(); }
+      };
+      loadFull(f.id, state).then(fallBack, fallBack);
+      if (serverIds) requery();
+      return;
+    }
+  }
   flows.set(f.id, model(state, f));
+  if (f.summary && f.id === selectedId) loadFull(f.id, state).catch(() => {});
   if (serverIds) requery();
   markDirty();
+}
+
+const fullLoads = new Map(); // id -> {state, promise}: whole records being fetched
+
+/**
+ * Fetches the whole record of flow `id` (`GET /api/v1/flows/{id}`); while the flow is the
+ * selected one it replaces the summary in the list. Resolves to the raw record.
+ */
+function loadFull(id, state) {
+  const running = fullLoads.get(id);
+  if (running && (!state || running.state === state)) return running.promise;
+  const promise = fetchStored(id, state, 5).then((item) => {
+    const current = flows.get(id);
+    if (current && id === selectedId && !(current.state === "done" && item.state === "pending")) {
+      flows.set(id, model(item.state, item.flow));
+      if (serverIds) requery();
+      markDirty();
+    }
+    return item.flow;
+  }).finally(() => {
+    if (fullLoads.get(id) && fullLoads.get(id).promise === promise) fullLoads.delete(id);
+  });
+  fullLoads.set(id, { state: state || null, promise });
+  return promise;
+}
+
+/**
+ * `GET /api/v1/flows/{id}`. An event can reach the page a moment before the store has it, so
+ * a record still older than `state` is asked for again, a few times.
+ */
+async function fetchStored(id, state, tries) {
+  const item = await apiJson("flows/" + id);
+  if (state === "done" && item.state === "pending" && tries > 0) {
+    await new Promise((r) => setTimeout(r, 100));
+    return fetchStored(id, state, tries - 1);
+  }
+  return item;
+}
+
+/** The whole record of flow `id`: the one in the list when it is whole, else fetched. */
+function fullFlow(id) {
+  const m = flows.get(id);
+  return m && m.full ? Promise.resolve(m.raw) : loadFull(id);
+}
+
+/** A whole exchange record cut down to the summary form the API sends (`?view=summary`). */
+function slim(f) {
+  if (f.summary || (f.type && f.type !== "exchange")) return f;
+  const s = Object.assign({}, f, { summary: true });
+  const contentType = header(f.response_headers, "content-type");
+  if (contentType) s.response_content_type = contentType;
+  delete s.request_headers;
+  delete s.response_headers;
+  delete s.response_trailers;
+  const body = (b) => {
+    if (!b) return b;
+    const out = { size: b.size, truncated: b.truncated, encoding: b.encoding };
+    if (b.content_encoding) out.content_encoding = b.content_encoding;
+    return out;
+  };
+  if ("request_body" in f) s.request_body = body(f.request_body);
+  if ("response_body" in f) s.response_body = body(f.response_body);
+  return s;
+}
+
+/** Drops the bodies and headers of a flow that is no longer shown, keeping its row. */
+function release(id) {
+  const m = flows.get(id);
+  if (m && m.full && m.raw.type !== "tls_failure" && m.raw.type !== "tunnel") {
+    flows.set(id, model(m.state, slim(m.raw)));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +577,10 @@ el.head.addEventListener("click", (e) => {
 
 function select(id, scroll) {
   if (id == null) return;
+  if (selectedId !== null && selectedId !== id) release(selectedId);
   selectedId = id;
+  const chosen = flows.get(id);
+  if (chosen && !chosen.full) loadFull(id).catch(() => {});
   renderRows(true);
   renderDetail();
   if (scroll) {
@@ -745,7 +838,9 @@ function syncTabVisibility(m) {
 function renderDetail() {
   const m = selectedId === null ? null : flows.get(selectedId);
   shownRaw = m ? m.raw : null;
-  syncTabVisibility(m);
+  // A summary row lacks headers and bodies: tabs wait for the whole record (loadFull).
+  const loading = Boolean(m) && !m.full;
+  if (!loading) syncTabVisibility(m);
   const panel = el.panel;
   const scroll = panel.scrollTop;
   const sameFlow = panel.dataset.flow === String(selectedId) && panel.dataset.tab === tab;
@@ -757,6 +852,10 @@ function renderDetail() {
   for (const fn of hooks.detail) fn(m);
   if (!m) {
     panel.append(h("p", "hint", "Select a flow. Keys: j / k or arrows move, / searches, Esc clears, 1-4 switch tabs."));
+    return;
+  }
+  if (loading) {
+    panel.append(h("p", "hint", "Loading flow #" + m.id + "..."));
     return;
   }
   const spec = TABS.find((t) => t.id === tab) || TABS[0];
@@ -1239,7 +1338,7 @@ function dispatch(message) {
 
 /** Loads flows newer than `after` from the store and merges them. */
 async function loadFlows(after) {
-  const response = await api("flows" + (after ? "?after=" + after : ""));
+  const response = await api("flows?view=summary" + (after ? "&after=" + after : ""));
   if (response.status === 401) throw new TokenError();
   if (!response.ok) throw new Error("HTTP " + response.status);
   for (const item of await response.json()) upsert(item.state, item.flow);
@@ -1259,7 +1358,7 @@ function resumePoint() {
 }
 
 async function stream() {
-  const response = await api("events", { headers: { Accept: "text/event-stream" } });
+  const response = await api("events?view=summary", { headers: { Accept: "text/event-stream" } });
   if (response.status === 401) throw new TokenError();
   if (!response.ok || !response.body) throw new Error("HTTP " + response.status);
   return response.body.pipeThrough(new TextDecoderStream()).getReader();

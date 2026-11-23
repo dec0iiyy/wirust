@@ -2,17 +2,22 @@
 //! `GET /api/v1/flows/{id}/curl`. `control::route` calls [`route`] after its Host, Origin
 //! and token checks.
 
+use std::io::{self, Write as _};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
 use http::{Method, Response, StatusCode};
+use http_body_util::{BodyExt as _, Full};
 use serde::Serialize;
+use tokio::sync::mpsc;
 
+use crate::control::{ChannelBody, ControlBody};
 use crate::events::{Filter, FlowStore, StoredFlow};
 use crate::flow::Event;
 use crate::har::{self, Plus, percent_decode};
 use crate::query::{MAX_QUERY_LEN, Query};
+use crate::ws::WsStore;
 use crate::{codegen, curl, events::Flow};
 
 /// Answers the interchange routes; `None` leaves the request to `control::route`.
@@ -24,7 +29,6 @@ pub(crate) fn route(
 ) -> Option<Response<Bytes>> {
     let get = method == Method::GET;
     Some(match segments {
-        ["har"] if get => har(store, query),
         ["flows", id, "curl"] if get => curl(store, id),
         ["flows", id, "code"] if get => code(store, id, query),
         ["har"] | ["flows", _, "curl" | "code"] => {
@@ -66,30 +70,62 @@ fn param<'q>(query: &'q str, key: &str) -> Option<&'q str> {
         .find_map(|(k, v)| (k == key).then_some(v))
 }
 
-fn har(store: &FlowStore, query: &str) -> Response<Bytes> {
-    let search = match search(query) {
-        Ok(search) => search,
-        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
-    };
+/// Bytes the HAR stream hands to the connection at a time.
+const HAR_CHUNK: usize = 64 * 1024;
+
+/// Chunks the HAR writer may run ahead of the client.
+const HAR_CHUNKS_AHEAD: usize = 4;
+
+/// `GET /api/v1/har`: the finished flows matching `q` (and `limit`) as a HAR document,
+/// streamed (`docs/interchange.md`). `None` leaves other requests to [`route`].
+pub(crate) fn har_route(
+    store: &FlowStore,
+    method: &Method,
+    segments: &[&str],
+    query: &str,
+) -> Option<Response<ControlBody>> {
+    if method != Method::GET || segments != ["har"] {
+        return None;
+    }
+    Some(match har_flows(store, query) {
+        Ok(flows) => har_stream(flows, store.ws().clone()),
+        Err(e) => error(StatusCode::BAD_REQUEST, &e).map(|body| Full::new(body).boxed_unsync()),
+    })
+}
+
+/// The finished flows a HAR request asks for, oldest first.
+fn har_flows(store: &FlowStore, query: &str) -> Result<Vec<Arc<Flow>>, String> {
     let filter = Filter {
         limit: param(query, "limit").and_then(|v| v.parse().ok()),
-        query: search,
+        query: search(query)?,
         ..Filter::default()
     };
-    let flows: Vec<Arc<Flow>> = store
-        .list(.., &filter)
-        .into_iter()
+    let flows = store.list(.., &filter).into_iter();
+    Ok(flows
         .filter_map(|f| match f {
             StoredFlow::Done(flow) => Some(flow),
             StoredFlow::Pending(_) => None,
         })
-        .collect();
-    let document = har::to_har_with_ws(flows.iter().map(AsRef::as_ref), Some(store.ws()));
-    let body = match serde_json::to_vec(&document) {
-        Ok(body) => body,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    };
-    let mut response = respond(StatusCode::OK, "application/json", Bytes::from(body));
+        .collect())
+}
+
+/// Serialises the HAR document of `flows` on a blocking thread, entry by entry, into a
+/// chunked body: memory stays near one entry plus a few chunks, whatever the export size.
+fn har_stream(flows: Vec<Arc<Flow>>, ws: WsStore) -> Response<ControlBody> {
+    let (sender, receiver) = mpsc::channel::<Bytes>(HAR_CHUNKS_AHEAD);
+    tokio::task::spawn_blocking(move || {
+        let mut out = io::BufWriter::with_capacity(HAR_CHUNK, ChunkSender(sender));
+        let document = har::StreamedHar::new(&flows, Some(&ws));
+        // An error means the client went away; the body then just ends.
+        if serde_json::to_writer(&mut out, &document).is_ok() {
+            let _ = out.flush();
+        }
+    });
+    let mut response = Response::new(ChannelBody { receiver }.boxed_unsync());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     let disposition = format!("attachment; filename=\"{}\"", har::download_name());
     if let Ok(value) = HeaderValue::from_str(&disposition) {
         response
@@ -97,6 +133,22 @@ fn har(store: &FlowStore, query: &str) -> Response<Bytes> {
             .insert(header::CONTENT_DISPOSITION, value);
     }
     response
+}
+
+/// A blocking [`io::Write`] into the channel of a [`ChannelBody`].
+struct ChunkSender(mpsc::Sender<Bytes>);
+
+impl io::Write for ChunkSender {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .blocking_send(Bytes::copy_from_slice(buf))
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn curl(store: &FlowStore, id: &str) -> Response<Bytes> {
@@ -181,8 +233,16 @@ mod tests {
         store
     }
 
-    fn har_ids(response: &Response<Bytes>) -> Vec<String> {
-        let value: serde_json::Value = serde_json::from_slice(response.body()).expect("JSON body");
+    /// `GET /api/v1/har?{query}`: status, headers and the whole streamed body.
+    async fn get_har(store: &FlowStore, query: &str) -> (Response<()>, Bytes) {
+        let response = har_route(store, &Method::GET, &["har"], query).expect("handled");
+        let (parts, body) = response.into_parts();
+        let body = body.collect().await.expect("infallible").to_bytes();
+        (Response::from_parts(parts, ()), body)
+    }
+
+    fn har_ids(body: &[u8]) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_slice(body).expect("JSON body");
         value["log"]["entries"]
             .as_array()
             .into_iter()
@@ -191,36 +251,52 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn har_route_filters_and_names_the_download() {
+    #[tokio::test]
+    async fn har_route_filters_and_names_the_download() {
         let store = store();
-        let response = route(
-            &store,
-            &Method::GET,
-            &["har"],
-            "q=host%3Aa.test+status%3A5xx",
-        )
-        .expect("handled");
+        let (response, body) = get_har(&store, "q=host%3Aa.test+status%3A5xx").await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(har_ids(&response), ["https://a.test/x"]);
+        assert_eq!(har_ids(&body), ["https://a.test/x"]);
         let disposition = response.headers()[header::CONTENT_DISPOSITION]
             .to_str()
             .unwrap_or_default();
         assert!(disposition.starts_with(&format!("attachment; filename=\"{}-", crate::NAME)));
         assert!(disposition.ends_with(".har\""));
-        let all = route(&store, &Method::GET, &["har"], "limit=2").expect("handled");
+        let (_, all) = get_har(&store, "limit=2").await;
         assert_eq!(har_ids(&all).len(), 2);
     }
 
-    #[test]
-    fn bad_and_huge_queries_are_400() {
+    #[tokio::test]
+    async fn the_streamed_har_is_the_bytes_the_built_document_serialises_to() {
         let store = store();
-        let bad = route(&store, &Method::GET, &["har"], "q=status%3Aabc").expect("handled");
+        let mut big = exchange(4, "POST", "https://c.test/up", 200);
+        big.response_body = Some(crate::flow::BodyRecord::from_bytes(
+            &vec![b'z'; 3 * HAR_CHUNK],
+            3 * HAR_CHUNK as u64,
+            false,
+        ));
+        store.apply(&FlowEvent::finished(Event::Exchange(Box::new(big))));
+        let (response, body) = get_har(&store, "").await;
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let flows = har_flows(&store, "").expect("no query");
+        let built = har::to_har_with_ws(flows.iter().map(AsRef::as_ref), Some(store.ws()));
+        let want = serde_json::to_vec(&built).expect("serialisable");
+        assert_eq!(body.len(), want.len());
+        assert!(body == want, "the streamed HAR differs from the built one");
+        assert_eq!(har::from_har(&body).map(|f| f.len()).ok(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn bad_and_huge_queries_are_400() {
+        let store = store();
+        let (bad, _) = get_har(&store, "q=status%3Aabc").await;
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         let huge = format!("q={}", "a".repeat(1024 * 1024));
-        let huge = route(&store, &Method::GET, &["har"], &huge).expect("handled");
+        let (huge, _) = get_har(&store, &huge).await;
         assert_eq!(huge.status(), StatusCode::BAD_REQUEST);
         assert!(search("q=").is_ok_and(|q| q.is_none()));
+        assert!(har_route(&store, &Method::POST, &["har"], "").is_none());
+        assert!(har_route(&store, &Method::GET, &["flows"], "").is_none());
     }
 
     #[test]
