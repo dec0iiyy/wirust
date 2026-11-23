@@ -106,6 +106,22 @@ pub trait Interceptor: Send + Sync {
         false
     }
 
+    /// Whether `on_request` needs the body of this request, asked before the chain runs with
+    /// the request as the client sent it. Defaults to [`Interceptor::needs_request_body`];
+    /// answering per exchange keeps every other request streaming.
+    fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        let _ = request;
+        self.needs_request_body()
+    }
+
+    /// Whether `on_response` needs the body of this response, asked when its head arrives,
+    /// before the chain runs. Defaults to [`Interceptor::needs_response_body`]; answering per
+    /// exchange keeps every other response (event streams, downloads) streaming.
+    fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        let _ = (request, response);
+        self.needs_response_body()
+    }
+
     /// Looks at or changes the request before it goes to the server.
     fn on_request(&self, request: &mut RequestCtx) -> Action {
         let _ = request;
@@ -161,6 +177,19 @@ impl Interceptors {
     #[must_use]
     pub fn needs_response_body(&self) -> bool {
         self.chain.iter().any(|i| i.needs_response_body())
+    }
+
+    /// Whether any interceptor needs the body of `request` buffered.
+    pub fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        self.chain.iter().any(|i| i.wants_request_body(request))
+    }
+
+    /// Whether any interceptor needs the body of `response` to `request` buffered.
+    #[must_use]
+    pub fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        self.chain
+            .iter()
+            .any(|i| i.wants_response_body(request, response))
     }
 
     /// Runs `on_request` of each interceptor, applying delays and pauses, until one responds.
@@ -293,10 +322,19 @@ pub struct Server {
 }
 
 impl Edit {
-    fn apply_request(self, ctx: &mut RequestCtx) {
-        for name in self.remove_headers {
-            ctx.headers.remove(name);
+    /// Removes the headers to remove and, with a new body, `Content-Encoding`: the paused body
+    /// is the wire bytes, a new one goes on as identity unless `set_headers` names a coding.
+    fn clear_headers(&mut self, headers: &mut HeaderMap) {
+        for name in self.remove_headers.drain(..) {
+            headers.remove(name);
         }
+        if self.body.is_some() {
+            headers.remove(http::header::CONTENT_ENCODING);
+        }
+    }
+
+    fn apply_request(mut self, ctx: &mut RequestCtx) {
+        self.clear_headers(&mut ctx.headers);
         for (name, value) in self.set_headers {
             ctx.headers.insert(name, value);
         }
@@ -316,10 +354,8 @@ impl Edit {
         }
     }
 
-    fn apply_response(self, ctx: &mut ResponseCtx) {
-        for name in self.remove_headers {
-            ctx.headers.remove(name);
-        }
+    fn apply_response(mut self, ctx: &mut ResponseCtx) {
+        self.clear_headers(&mut ctx.headers);
         for (name, value) in self.set_headers {
             ctx.headers.insert(name, value);
         }
@@ -716,6 +752,56 @@ impl Interceptor for BlockHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_body_for_a_paused_gzip_response_goes_on_as_identity() {
+        let paused = || {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+            ResponseCtx {
+                status: StatusCode::OK,
+                headers,
+                body: Some(Bytes::from_static(b"\x1f\x8b raw gzip bytes")),
+                flags: Vec::new(),
+                throttle: None,
+            }
+        };
+        let mut response = paused();
+        Edit {
+            body: Some(Bytes::from_static(b"plain text")),
+            ..Edit::default()
+        }
+        .apply_response(&mut response);
+        assert_eq!(response.body.as_deref(), Some(&b"plain text"[..]));
+        assert!(!response.headers.contains_key("content-encoding"));
+
+        // An edit that names its own coding keeps it; one without a body changes nothing.
+        let mut response = paused();
+        Edit {
+            body: Some(Bytes::from_static(b"\x1f\x8b other")),
+            set_headers: vec![(
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("gzip"),
+            )],
+            ..Edit::default()
+        }
+        .apply_response(&mut response);
+        assert_eq!(response.headers["content-encoding"], "gzip");
+        let mut response = paused();
+        Edit::default().apply_response(&mut response);
+        assert_eq!(response.headers["content-encoding"], "gzip");
+
+        let mut request = ctx("example.com");
+        request
+            .headers
+            .insert("content-encoding", HeaderValue::from_static("br"));
+        Edit {
+            body: Some(Bytes::from_static(b"{}")),
+            ..Edit::default()
+        }
+        .apply_request(&mut request);
+        assert!(!request.headers.contains_key("content-encoding"));
+    }
 
     fn ctx(host: &str) -> RequestCtx {
         RequestCtx {

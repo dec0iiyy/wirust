@@ -262,6 +262,58 @@ async fn https_goes_through_an_http_connect_proxy_with_credentials() -> TestResu
 }
 
 #[tokio::test]
+async fn absolute_form_names_the_target_not_the_host_header() -> TestResult {
+    let server = http_server().await?;
+    let (proxy_port, log) = http_proxy(None, None).await?;
+    let file: wirust::rules::RulesFile = toml::from_str(&format!(
+        r#"
+[[rules]]
+name = "remote"
+match = {{ host = "app.test" }}
+action = {{ type = "map_remote", host = "mapped.test", port = {server} }}
+
+[[rules]]
+name = "host"
+match = {{ host = "app.test" }}
+action = {{ type = "rewrite_headers", set = {{ "host" = "chosen.test" }} }}
+"#
+    ))?;
+    let rules = wirust::rules::Rules::new();
+    rules.replace(&file).map_err(anyhow::Error::msg)?;
+    let certs = upstream_certs()?;
+    let mut config = Config {
+        upstream_proxy: Some(format!("http://127.0.0.1:{proxy_port}").parse()?),
+        ..test_config(&certs.ca, 4096)?
+    };
+    for stage in rules.interceptors(&config.pauses) {
+        config.interceptors.push(stage);
+    }
+    let dir = config.config_dir.clone();
+    let running = spawn(Proxy::bind(config).await?, dir);
+
+    // The client's Host differs from its absolute URL; the URL names the server.
+    let tcp = TcpStream::connect(running.addr).await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(connection);
+    let request = Request::get(format!("http://origin.test:{server}/a"))
+        .header("host", "other.test")
+        .body(Empty::<bytes::Bytes>::new())?;
+    let status = sender.send_request(request).await?.status();
+    assert_eq!(status, StatusCode::OK, "{:?}", log_of(&log));
+    // Map-remote with a rule's own Host: the request line names the mapped server.
+    let (status, body) = http_get(&running, "http://app.test:1/b").await?;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "hello from /b"));
+    assert_eq!(
+        log_of(&log),
+        [
+            format!("GET http://origin.test:{server}/a auth=true"),
+            format!("GET http://mapped.test:{server}/b auth=true"),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn plain_http_goes_to_an_http_proxy_in_absolute_form() -> TestResult {
     let server = http_server().await?;
     let (proxy_port, log) = http_proxy(Some(BASIC), None).await?;

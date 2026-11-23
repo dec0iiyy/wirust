@@ -48,15 +48,22 @@ built in parallel without editing the same functions.
 2. CONNECT: `tunnel` peeks the ClientHello, fingerprints it, issues a leaf, accepts TLS and
    serves h2 or HTTP/1.1. Each request calls `forward`.
 3. `forward` builds the `Exchange` record and publishes `FlowEvent::Started`.
-4. With interceptors registered (and not a WebSocket upgrade), `intercept_request` buffers the
-   request body if any interceptor `needs_request_body` (up to `--body-limit`; over it the body
+4. With interceptors registered, `intercept_request` buffers the request body if any
+   interceptor `wants_request_body` for this request (rules answer per exchange from their
+   matchers; the default is the global `needs_request_body`, which scripts use) (never for
+   an HTTP/1.1 `Upgrade` request, which runs the
+   request half unbuffered and skips the response half once a `101` arrives; up to
+   `--body-limit`; over it the body
    streams unchanged and the record gets `rewrite_skipped_body_too_large`), then runs
    `on_request` in order. `Respond` ends the chain and the exchange (`respond_locally`, no
    server contact); `Delay` sleeps; `Pause` waits on a `PauseHandle` (oneshot plus
    `--pause-timeout`, default 5 min; timeout goes on unchanged and flags `pause_timed_out`).
 5. `connect` gets the tunnel's pooled server connection or opens one; `prepare` rewrites the
    request for the server's protocol; the response head arrives.
-6. `intercept_response` does the same for `on_response` (`needs_response_body` buffers).
+6. `intercept_response` does the same for `on_response`: `wants_response_body` sees the
+   response head before anything is buffered, so unmatched responses stream with no delay.
+   A buffered body keeps its `Content-Length` unless the chain changed it, and `HEAD`, `204`
+   and `304` answers never get a new one.
 7. The response body streams to the client through `Tee`; when it ends, `on_end` publishes
    `Completed` (or `Failed` when the exchange has an `error`). A refused handshake publishes
    `TlsFailed`; a non-TLS tunnel publishes `Completed` with a `tunnel` record.

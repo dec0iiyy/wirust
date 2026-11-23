@@ -811,13 +811,15 @@ where
     let request_capture: SharedCapture = Arc::new(Mutex::new(Capture::new(state.body_limit)));
     let tee = Tee::new(incoming, Arc::clone(&request_capture), None);
 
-    // Upgrades are joined byte for byte and skip the chain; so do replays without rules.
+    // Replays without rules skip the chain. Upgrades run its request half without buffering
+    // (block, map, header edits apply); after a `101` the bytes are joined as they are.
     let rules = (parts.extensions.get::<ReplayTag>()).is_none_or(|tag| tag.apply_rules);
-    let intercepting = !state.interceptors.is_empty() && !upgrade && rules;
+    let intercepting = !state.interceptors.is_empty() && rules;
     let mut ctx = None;
+    let client_host = parts.headers.get(header::HOST).cloned();
     let body = if intercepting {
         let mut req = target.request_ctx(record.id, peer, &mut parts, path);
-        match intercept_request(state, &mut req, &mut parts, tee, &mut record).await {
+        match intercept_request(state, &mut req, &mut parts, tee, upgrade, &mut record).await {
             Ok(body) => {
                 ctx = Some(req);
                 body
@@ -839,6 +841,10 @@ where
     };
 
     let remapped = remap(target, ctx.as_ref(), &mut record);
+    if remapped.is_some() && parts.headers.get(header::HOST) == client_host.as_ref() {
+        // The new server's authority, as HTTP/2 gets it; a `Host` a rule set stays.
+        parts.headers.remove(header::HOST);
+    }
     let (target, pool) = remapped.as_ref().map_or((target, pool), |r| (r, None));
     let sender = match connect(state, target, pool, upgrade, &mut record.timing).await {
         Ok(sender) => sender,
@@ -1038,12 +1044,14 @@ enum Stop {
 }
 
 /// Runs the request half of the chain, buffering the body first when an interceptor needs
-/// it, and applies the result to `parts`. Returns the body to send to the server.
+/// it for this request (never for an `upgrade`), and applies the result to `parts`.
+/// Returns the body to send to the server.
 async fn intercept_request<B>(
     state: &State,
     req: &mut RequestCtx,
     parts: &mut http::request::Parts,
     tee: Tee<B>,
+    upgrade: bool,
     record: &mut Exchange,
 ) -> Result<ProxyBody, Stop>
 where
@@ -1051,7 +1059,7 @@ where
     B::Error: Into<BoxError> + std::fmt::Display,
 {
     let mut body = None;
-    if state.interceptors.needs_request_body() {
+    if !upgrade && state.interceptors.wants_request_body(req) {
         match body::buffer(tee, state.body_limit).await {
             Ok(Buffered::Whole(bytes)) => req.body = Some(bytes),
             Ok(Buffered::TooLarge(rest)) => {
@@ -1105,9 +1113,13 @@ async fn intercept_response(
         throttle: None,
     };
     let mut body = None;
-    if state.interceptors.needs_response_body() {
+    let mut buffered = None;
+    if state.interceptors.wants_response_body(request, &ctx) {
         match body::buffer(incoming, state.body_limit).await? {
-            Buffered::Whole(bytes) => ctx.body = Some(bytes),
+            Buffered::Whole(bytes) => {
+                buffered = Some(bytes.clone());
+                ctx.body = Some(bytes);
+            }
             Buffered::TooLarge(rest) => {
                 ctx.flags.push(Flag::RewriteSkippedBodyTooLarge);
                 body = Some(boxed(rest));
@@ -1133,7 +1145,10 @@ async fn intercept_response(
     parts.headers = ctx.headers;
     let body = match ctx.body {
         Some(bytes) => {
-            set_length(&mut parts.headers, bytes.len());
+            // An unchanged body keeps its length; HEAD, 204 and 304 describe a body never sent.
+            if buffered.as_ref() != Some(&bytes) && !bodiless(&request.method, parts.status) {
+                set_length(&mut parts.headers, bytes.len());
+            }
             full(bytes)
         }
         None => body.unwrap_or_else(empty),
@@ -1196,6 +1211,15 @@ fn magic_response<B>(state: &State, peer: SocketAddr, request: &Request<B>) -> R
     .into_parts();
     parts.version = request.version();
     Response::from_parts(parts, full(bytes))
+}
+
+/// Whether a response to `method` with `status` carries no body, so its `Content-Length`
+/// describes the representation rather than the bytes that follow (RFC 9110, 8.6).
+fn bodiless(method: &http::Method, status: StatusCode) -> bool {
+    method == http::Method::HEAD
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
 }
 
 fn set_length(headers: &mut HeaderMap, len: usize) {
