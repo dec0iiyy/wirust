@@ -103,6 +103,10 @@ async fn read_more<S: AsyncRead + Unpin>(stream: &mut S, raw: &mut Vec<u8>) -> i
 }
 
 /// The server name from a parsed ClientHello's `server_name` extension.
+///
+/// A name that is not a DNS host name or an IP literal (see [`is_host_name`]) counts as no
+/// SNI: the certificate is then issued for the CONNECT host, and the flow record and the
+/// console show "no SNI". The connection itself goes on.
 #[must_use]
 pub fn sni(hello: &fingerprint::ClientHello) -> Option<String> {
     let data = &hello.extensions.iter().find(|e| e.kind == 0)?.data;
@@ -111,7 +115,31 @@ pub fn sni(hello: &fingerprint::ClientHello) -> Option<String> {
         return None;
     };
     let name = rest.get(..usize::from(u16::from_be_bytes([*hi, *lo])))?;
-    std::str::from_utf8(name).ok().map(str::to_owned)
+    let name = std::str::from_utf8(name).ok()?;
+    is_host_name(name).then(|| name.to_owned())
+}
+
+/// Longest DNS name in its text form, without a trailing dot (RFC 1035).
+const MAX_NAME: usize = 253;
+/// Longest DNS label (RFC 1035).
+const MAX_LABEL: usize = 63;
+
+/// Whether `name` is an IP literal or an ASCII DNS name: dot-separated labels of 1 to 63
+/// letters, digits, hyphens or underscores (seen in the wild), at most 253 bytes, no
+/// trailing dot (RFC 6066 forbids it in SNI).
+#[must_use]
+pub fn is_host_name(name: &str) -> bool {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !name.is_empty()
+        && name.len() <= MAX_NAME
+        && name.split('.').all(|label| {
+            (1..=MAX_LABEL).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
 }
 
 /// A stream that yields `prefix` before reading from the inner stream; writes go straight
@@ -258,6 +286,47 @@ mod tests {
         stream.read_to_end(&mut replayed).await?;
         assert_eq!(replayed, wire, "the acceptor must see the bytes as sent");
         Ok(())
+    }
+
+    fn sni_of(host: &str) -> Option<String> {
+        sni(&fingerprint::ClientHello::parse(&hello_message(host)))
+    }
+
+    #[test]
+    fn host_names_and_ip_literals_are_kept() {
+        let long_label = "a".repeat(63);
+        for host in [
+            "example.com",
+            "xn--e1afmkfd.xn--p1ai",
+            "my_host-1.local",
+            "127.0.0.1",
+            "::1",
+            long_label.as_str(),
+        ] {
+            assert_eq!(sni_of(host).as_deref(), Some(host), "{host:?}");
+        }
+    }
+
+    #[test]
+    fn names_that_are_not_host_names_count_as_no_sni() {
+        let long_label = format!("{}.com", "a".repeat(64));
+        let long_name = ["abcdefghi"; 26].join(".");
+        for host in [
+            "\u{1b}]0;title\u{7}\u{1b}]52;c;cHduZWQ=\u{7}\u{1b}[2K\rforged.example",
+            "nul\0.example",
+            "del\u{7f}.example",
+            "csi\u{9b}.example",
+            "space here.example",
+            "пример.рф",
+            "a..b",
+            ".example",
+            "example.com.",
+            "",
+            long_label.as_str(),
+            long_name.as_str(),
+        ] {
+            assert_eq!(sni_of(host), None, "{host:?}");
+        }
     }
 
     #[tokio::test]

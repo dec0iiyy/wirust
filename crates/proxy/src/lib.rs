@@ -14,6 +14,7 @@ pub mod ca;
 pub mod certs;
 mod clock;
 pub mod codegen;
+pub mod console;
 pub mod control;
 pub mod curl;
 pub mod decode;

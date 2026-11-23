@@ -15,6 +15,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::console::escape;
 use crate::events::{Flow, FlowEvent, SCHEMA_VERSION};
 use crate::query::Query;
 use crate::ws::{WsMessage, WsStore};
@@ -236,7 +237,7 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
         None => read_from(io::stdin().lock()).context("reading flows from stdin")?,
     };
     for warning in &session.warnings {
-        eprintln!("{}: warning: {warning}", crate::NAME);
+        eprintln!("{}: warning: {}", crate::NAME, escape(warning));
     }
     let ws = WsStore::new(usize::MAX);
     for message in session.messages {
@@ -255,7 +256,8 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
 }
 
 /// `NAME view`: prints the flows of a session file as the live text log does, each
-/// WebSocket upgrade followed by its messages as `--ws-log` prints them.
+/// WebSocket upgrade followed by its messages as `--ws-log` prints them. Control characters
+/// are escaped, as on the live console.
 ///
 /// # Errors
 ///
@@ -263,9 +265,9 @@ fn load(source: Option<&Path>, filter: Option<&str>) -> anyhow::Result<(Vec<Flow
 pub fn view(session: &Path, filter: Option<&str>, out: &mut impl io::Write) -> anyhow::Result<()> {
     let (flows, ws) = load(Some(session), filter)?;
     for flow in flows {
-        writeln!(out, "{}", flow.record)?;
+        writeln!(out, "{}", escape(&flow.record.to_string()))?;
         for message in ws.list(flow.id(), None, usize::MAX) {
-            writeln!(out, "  {}", crate::ws::log_line(&message))?;
+            writeln!(out, "  {}", escape(&crate::ws::log_line(&message)))?;
         }
     }
     Ok(())
@@ -471,6 +473,35 @@ mod tests {
         let back = read(&imported)?;
         let data: Vec<&str> = back.messages.iter().map(|m| m.data.as_str()).collect();
         assert_eq!(data, ["hello", "world"]);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn view_escapes_terminal_controls() -> anyhow::Result<()> {
+        let dir = temp_dir("escape");
+        let path = dir.join("s.jsonl");
+        let mut writer = SessionWriter::create(&path, Existing::Append)?;
+        for (id, (raw, _)) in (1..).zip(crate::console::tests::HOSTILE) {
+            let mut x = exchange(id, "GET", &format!("https://a.test/{raw}"), 200);
+            x.reason = Some((*raw).to_owned());
+            writer.append(&Flow::new(Event::Exchange(Box::new(x))))?;
+        }
+        drop(writer);
+        let mut out = Vec::new();
+        view(&path, None, &mut out)?;
+        let printed = String::from_utf8(out)?;
+        assert_eq!(
+            printed.lines().count(),
+            crate::console::tests::HOSTILE.len()
+        );
+        assert!(
+            !printed.chars().any(|c| c.is_control() && c != '\n'),
+            "{printed:?}"
+        );
+        for (_, shown) in crate::console::tests::HOSTILE {
+            assert!(printed.contains(shown), "{shown} missing from {printed}");
+        }
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

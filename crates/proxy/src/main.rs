@@ -13,6 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use wirust::adb::{self, Adb};
 use wirust::ca::Ca;
+use wirust::console;
 use wirust::control::ControlPlane;
 use wirust::events::{DEFAULT_MAX_FLOWS, FlowEvent};
 use wirust::flow::Event;
@@ -1052,7 +1053,10 @@ fn main() -> ExitCode {
     match parse(&args).and_then(execute) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{NAME}: {e:#}");
+            // Errors may quote traffic (a session file, a peer's answer); keep their lines.
+            let text = format!("{e:#}");
+            let lines: Vec<_> = text.lines().map(console::escape).collect();
+            eprintln!("{NAME}: {}", lines.join("\n"));
             ExitCode::FAILURE
         }
     }
@@ -1684,7 +1688,8 @@ async fn print_flows(
             Some(deadline) => tokio::select! {
                 received = events.recv() => received,
                 () = tokio::time::sleep_until(deadline.into()) => {
-                    if print_lines(&mut stdout, &folder.expire(Instant::now())).is_err() {
+                    let lines = escape_lines(folder.expire(Instant::now()));
+                    if print_lines(&mut stdout, &lines).is_err() {
                         break;
                     }
                     continue;
@@ -1707,26 +1712,37 @@ async fn print_flows(
 }
 
 /// The console lines `event` turns into: none for events the console does not show.
+/// Control characters from the traffic are escaped (see [`console`]).
 fn console_lines(event: &FlowEvent, json: bool, ws_log: WsLog, folder: &mut Folder) -> Vec<String> {
     let now = Instant::now();
     match event.flow() {
-        Some(flow) if json => vec![
-            serde_json::to_string(&**flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-        ],
+        Some(flow) if json => {
+            let line =
+                serde_json::to_string(&**flow).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+            vec![console::escape_json(&line).into_owned()]
+        }
         Some(flow) => {
             let failure = match &flow.record {
                 Event::TlsFailure(failure) => Some(failure),
                 _ => None,
             };
-            folder.lines(now, failure, flow.record.to_string())
+            escape_lines(folder.lines(now, failure, flow.record.to_string()))
         }
         None => match event {
             FlowEvent::WsMessage(message) if ws_log == WsLog::Lines => {
-                folder.lines(now, None, ws::log_line(message))
+                escape_lines(folder.lines(now, None, ws::log_line(message)))
             }
             _ => Vec::new(),
         },
     }
+}
+
+/// Text console lines with their control characters escaped.
+fn escape_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| console::escape(&line).into_owned())
+        .collect()
 }
 
 /// Writes each line and flushes, so a pipe sees them at once.
@@ -2087,6 +2103,54 @@ mod tests {
             .expect("the connect usage line follows the plain run");
         for flag in ["--passthrough PATTERN", "--decrypt-only PATTERN"] {
             assert!(run_usage.contains(flag), "{flag} missing from: {run_usage}");
+        }
+    }
+
+    /// Terminal escapes a hostile peer might put in a URL, reason phrase or error.
+    const HOSTILE: &str = "\u{1b}]0;t\u{7}\u{1b}]52;c;eA==\u{7}\u{1b}[2K\rforged\0\u{7f}\u{9b}";
+
+    fn hostile_flows() -> Vec<FlowEvent> {
+        let exchange: wirust::flow::Exchange = serde_json::from_value(serde_json::json!({
+            "id": 1, "time": "2026-01-02T03:04:05Z", "client": "127.0.0.1:1", "method": "GET",
+            "url": format!("http://a.test/{HOSTILE}"), "client_version": "http/1.1",
+            "upstream_version": null, "status": 200, "reason": HOSTILE,
+            "request_headers": [], "response_headers": [],
+            "request_body": {"size": 0, "truncated": false, "encoding": "utf8", "data": ""},
+            "response_body": null, "timing": {"total_ms": 1.0}, "tls": null, "error": HOSTILE,
+        }))
+        .expect("exchange fixture");
+        let failure = wirust::flow::TlsFailure {
+            id: 2,
+            time: "2026-01-02T03:04:05Z".to_owned(),
+            client: SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            target: format!("{HOSTILE}:443"),
+            sni: None,
+            ja4: HOSTILE.to_owned(),
+            known_client: Some(HOSTILE.to_owned()),
+            reason: HOSTILE.to_owned(),
+        };
+        [
+            Event::Exchange(Box::new(exchange)),
+            Event::TlsFailure(failure),
+        ]
+        .into_iter()
+        .map(|record| FlowEvent::Failed(Arc::new(wirust::events::Flow::new(record))))
+        .collect()
+    }
+
+    #[test]
+    fn console_lines_escape_terminal_controls_from_the_traffic() {
+        for event in hostile_flows() {
+            for json in [false, true] {
+                let lines = console_lines(&event, json, WsLog::Off, &mut Folder::new());
+                assert!(!lines.is_empty(), "json {json}");
+                for line in lines {
+                    assert!(!line.chars().any(char::is_control), "json {json}: {line:?}");
+                    if !json {
+                        assert!(line.contains("\\u{1b}]52;c;eA==\\u{7}"), "{line}");
+                    }
+                }
+            }
         }
     }
 }
