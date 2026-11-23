@@ -199,7 +199,10 @@ The edit body:
 server like `map_remote`. `body_base64` replaces `body` for binary data (not both).
 `method` and `url` are request-phase only, `status` response-phase only. Header names must
 be tokens and values visible ASCII (no CR, LF or other control characters), at most 100
-headers per edit. An invalid edit answers `400` and the pause stays pending.
+headers per edit. An invalid edit answers `400` and the pause stays pending. A paused body
+is shown as it came over the wire; an edit with `body` or `body_base64` sends the new body
+as identity (`Content-Encoding` removed, `Content-Length` set) unless `set_headers` names a
+`content-encoding` itself.
 
 ### Events
 

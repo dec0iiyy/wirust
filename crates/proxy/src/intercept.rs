@@ -322,10 +322,19 @@ pub struct Server {
 }
 
 impl Edit {
-    fn apply_request(self, ctx: &mut RequestCtx) {
-        for name in self.remove_headers {
-            ctx.headers.remove(name);
+    /// Removes the headers to remove and, with a new body, `Content-Encoding`: the paused body
+    /// is the wire bytes, a new one goes on as identity unless `set_headers` names a coding.
+    fn clear_headers(&mut self, headers: &mut HeaderMap) {
+        for name in self.remove_headers.drain(..) {
+            headers.remove(name);
         }
+        if self.body.is_some() {
+            headers.remove(http::header::CONTENT_ENCODING);
+        }
+    }
+
+    fn apply_request(mut self, ctx: &mut RequestCtx) {
+        self.clear_headers(&mut ctx.headers);
         for (name, value) in self.set_headers {
             ctx.headers.insert(name, value);
         }
@@ -345,10 +354,8 @@ impl Edit {
         }
     }
 
-    fn apply_response(self, ctx: &mut ResponseCtx) {
-        for name in self.remove_headers {
-            ctx.headers.remove(name);
-        }
+    fn apply_response(mut self, ctx: &mut ResponseCtx) {
+        self.clear_headers(&mut ctx.headers);
         for (name, value) in self.set_headers {
             ctx.headers.insert(name, value);
         }
@@ -745,6 +752,56 @@ impl Interceptor for BlockHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_body_for_a_paused_gzip_response_goes_on_as_identity() {
+        let paused = || {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+            ResponseCtx {
+                status: StatusCode::OK,
+                headers,
+                body: Some(Bytes::from_static(b"\x1f\x8b raw gzip bytes")),
+                flags: Vec::new(),
+                throttle: None,
+            }
+        };
+        let mut response = paused();
+        Edit {
+            body: Some(Bytes::from_static(b"plain text")),
+            ..Edit::default()
+        }
+        .apply_response(&mut response);
+        assert_eq!(response.body.as_deref(), Some(&b"plain text"[..]));
+        assert!(!response.headers.contains_key("content-encoding"));
+
+        // An edit that names its own coding keeps it; one without a body changes nothing.
+        let mut response = paused();
+        Edit {
+            body: Some(Bytes::from_static(b"\x1f\x8b other")),
+            set_headers: vec![(
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("gzip"),
+            )],
+            ..Edit::default()
+        }
+        .apply_response(&mut response);
+        assert_eq!(response.headers["content-encoding"], "gzip");
+        let mut response = paused();
+        Edit::default().apply_response(&mut response);
+        assert_eq!(response.headers["content-encoding"], "gzip");
+
+        let mut request = ctx("example.com");
+        request
+            .headers
+            .insert("content-encoding", HeaderValue::from_static("br"));
+        Edit {
+            body: Some(Bytes::from_static(b"{}")),
+            ..Edit::default()
+        }
+        .apply_request(&mut request);
+        assert!(!request.headers.contains_key("content-encoding"));
+    }
 
     fn ctx(host: &str) -> RequestCtx {
         RequestCtx {
