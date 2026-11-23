@@ -48,8 +48,10 @@ built in parallel without editing the same functions.
 2. CONNECT: `tunnel` peeks the ClientHello, fingerprints it, issues a leaf, accepts TLS and
    serves h2 or HTTP/1.1. Each request calls `forward`.
 3. `forward` builds the `Exchange` record and publishes `FlowEvent::Started`.
-4. With interceptors registered (and not a WebSocket upgrade), `intercept_request` buffers the
-   request body if any interceptor `needs_request_body` (up to `--body-limit`; over it the body
+4. With interceptors registered, `intercept_request` buffers the request body if any
+   interceptor `needs_request_body` (never for an HTTP/1.1 `Upgrade` request, which runs the
+   request half unbuffered and skips the response half once a `101` arrives; up to
+   `--body-limit`; over it the body
    streams unchanged and the record gets `rewrite_skipped_body_too_large`), then runs
    `on_request` in order. `Respond` ends the chain and the exchange (`respond_locally`, no
    server contact); `Delay` sleeps; `Pause` waits on a `PauseHandle` (oneshot plus

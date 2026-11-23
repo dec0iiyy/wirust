@@ -777,13 +777,14 @@ where
     let request_capture: SharedCapture = Arc::new(Mutex::new(Capture::new(state.body_limit)));
     let tee = Tee::new(incoming, Arc::clone(&request_capture), None);
 
-    // Upgrades are joined byte for byte and skip the chain; so do replays without rules.
+    // Replays without rules skip the chain. Upgrades run its request half without buffering
+    // (block, map, header edits apply); after a `101` the bytes are joined as they are.
     let rules = (parts.extensions.get::<ReplayTag>()).is_none_or(|tag| tag.apply_rules);
-    let intercepting = !state.interceptors.is_empty() && !upgrade && rules;
+    let intercepting = !state.interceptors.is_empty() && rules;
     let mut ctx = None;
     let body = if intercepting {
         let mut req = target.request_ctx(record.id, peer, &mut parts, path);
-        match intercept_request(state, &mut req, &mut parts, tee, &mut record).await {
+        match intercept_request(state, &mut req, &mut parts, tee, upgrade, &mut record).await {
             Ok(body) => {
                 ctx = Some(req);
                 body
@@ -1004,12 +1005,14 @@ enum Stop {
 }
 
 /// Runs the request half of the chain, buffering the body first when an interceptor needs
-/// it, and applies the result to `parts`. Returns the body to send to the server.
+/// it for this request (never for an `upgrade`), and applies the result to `parts`.
+/// Returns the body to send to the server.
 async fn intercept_request<B>(
     state: &State,
     req: &mut RequestCtx,
     parts: &mut http::request::Parts,
     tee: Tee<B>,
+    upgrade: bool,
     record: &mut Exchange,
 ) -> Result<ProxyBody, Stop>
 where
@@ -1017,7 +1020,7 @@ where
     B::Error: Into<BoxError> + std::fmt::Display,
 {
     let mut body = None;
-    if state.interceptors.needs_request_body() {
+    if !upgrade && state.interceptors.needs_request_body() {
         match body::buffer(tee, state.body_limit).await {
             Ok(Buffered::Whole(bytes)) => req.body = Some(bytes),
             Ok(Buffered::TooLarge(rest)) => {
