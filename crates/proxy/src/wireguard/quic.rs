@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::{Buf as _, Bytes};
-use h3::server::RequestResolver;
+use h3::server::{RequestResolver, RequestStream};
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
-use http_body_util::channel::Channel;
+use http_body_util::channel::{self, Channel};
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Incoming, UdpPoller};
@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use super::server::udp_packet;
 use crate::flow::ClientTls;
 use crate::idle;
-use crate::proxy::{HANDSHAKE_TIMEOUT, QuicClient, State};
+use crate::proxy::{HANDSHAKE_TIMEOUT, ProxyBody, QuicClient, State};
 
 /// The UDP port QUIC is terminated on.
 pub(super) const QUIC_PORT: u16 = 443;
@@ -170,31 +170,45 @@ async fn serve_request(
     let Ok((request, stream)) = resolver.resolve_request().await else {
         return;
     };
-    let (mut send, mut recv) = stream.split();
-    let (mut body_tx, body) = Channel::<Bytes, BoxError>::new(BODY_CHUNKS);
-    tokio::spawn(async move {
-        loop {
-            match recv.recv_data().await {
-                Ok(Some(mut chunk)) => {
-                    let bytes = chunk.copy_to_bytes(chunk.remaining());
-                    if body_tx.send_data(bytes).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => return body_tx.abort(Box::new(e)),
-            }
-        }
-        if let Ok(Some(trailers)) = recv.recv_trailers().await {
-            let _ = body_tx.send_trailers(trailers).await;
-        }
-    });
+    let (down, up) = stream.split();
+    let (body_tx, body) = Channel::<Bytes, BoxError>::new(BODY_CHUNKS);
+    tokio::spawn(read_body(up, body_tx));
     let (parts, ()) = request.into_parts();
     let response = client
         .forward(&state, peer, Request::from_parts(parts, body))
         .await;
+    write_response(down, response).await;
+}
+
+/// Copies a request body from the HTTP/3 stream into the forwarded request.
+async fn read_body(
+    mut stream: RequestStream<h3_quinn::RecvStream, Bytes>,
+    mut body: channel::Sender<Bytes, BoxError>,
+) {
+    loop {
+        match stream.recv_data().await {
+            Ok(Some(mut chunk)) => {
+                let bytes = chunk.copy_to_bytes(chunk.remaining());
+                if body.send_data(bytes).await.is_err() {
+                    return;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return body.abort(Box::new(e)),
+        }
+    }
+    if let Ok(Some(trailers)) = stream.recv_trailers().await {
+        let _ = body.send_trailers(trailers).await;
+    }
+}
+
+/// Sends the response head, body and trailers on the HTTP/3 stream.
+async fn write_response(
+    mut stream: RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+    response: Response<ProxyBody>,
+) {
     let (parts, mut body) = response.into_parts();
-    if send
+    if stream
         .send_response(Response::from_parts(parts, ()))
         .await
         .is_err()
@@ -203,21 +217,21 @@ async fn serve_request(
     }
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
-            send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+            stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
             return;
         };
-        let sent = match frame.into_data() {
-            Ok(data) => send.send_data(data).await,
+        let written = match frame.into_data() {
+            Ok(data) => stream.send_data(data).await,
             Err(frame) => match frame.into_trailers() {
-                Ok(trailers) => send.send_trailers(trailers).await,
+                Ok(trailers) => stream.send_trailers(trailers).await,
                 Err(_) => Ok(()),
             },
         };
-        if sent.is_err() {
+        if written.is_err() {
             return;
         }
     }
-    let _ = send.finish().await;
+    let _ = stream.finish().await;
 }
 
 /// Leaf certificates for QUIC from the TCP path's cache, by SNI. No SNI, or a passthrough or
