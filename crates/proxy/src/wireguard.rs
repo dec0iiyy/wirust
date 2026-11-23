@@ -6,6 +6,7 @@
 //! what happens to each kind of packet and what is out of scope.
 
 mod config;
+mod quic;
 mod server;
 
 pub use config::{

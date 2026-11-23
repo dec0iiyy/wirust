@@ -1,9 +1,11 @@
 //! The WireGuard listener: noise sessions per configured peer, a userspace TCP/IP stack that
-//! terminates every tunneled TCP connection, and a DNS relay.
+//! terminates every tunneled TCP connection, a QUIC endpoint for UDP port 443, and a DNS
+//! relay.
 //!
 //! One task owns the UDP socket, the noise sessions and the TCP/IP stack. Each accepted TCP
 //! connection is bridged to an in-memory stream that [`serve_transparent`] reads as if the
-//! peer had sent CONNECT to the original destination.
+//! peer had sent CONNECT to the original destination. QUIC datagrams go to [`quic`]'s
+//! endpoint, whose replies come back like DNS answers.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -28,6 +30,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::config::{PREFIX_LEN, Peer, SERVER_ADDR};
+use super::quic::{self, Datagram, QUIC_PORT};
 use crate::clock::Utc;
 use crate::flow::{Event, Tunnel};
 use crate::proxy::{State, serve_transparent};
@@ -129,7 +132,18 @@ impl Server {
         } = self;
         let (down_tx, mut down_rx) = mpsc::channel(256);
         let (inject_tx, mut inject_rx) = mpsc::channel(64);
+        let quic = match quic::start(Arc::clone(&state), inject_tx.clone()) {
+            Ok(quic) => Some(quic),
+            Err(e) => {
+                eprintln!(
+                    "{}: wireguard: HTTP/3 is off, QUIC will be dropped: {e:#}",
+                    crate::NAME
+                );
+                None
+            }
+        };
         let mut engine = Engine::new(state, key, peers, resolver, down_tx, inject_tx);
+        engine.quic = quic;
         let mut datagram = vec![0_u8; DATAGRAM];
         let mut next_timers = tokio::time::Instant::now() + TIMER_TICK;
         loop {
@@ -203,6 +217,8 @@ struct Engine {
     blocked: bool,
     down_tx: mpsc::Sender<(SocketHandle, Option<Bytes>)>,
     inject_tx: mpsc::Sender<Vec<u8>>,
+    /// The QUIC endpoint's datagram queue; `None` when it could not start.
+    quic: Option<mpsc::Sender<Datagram>>,
     quic_reported: bool,
     dropped_ports: HashSet<u16>,
     out: Vec<u8>,
@@ -262,6 +278,7 @@ impl Engine {
             blocked: false,
             down_tx,
             inject_tx,
+            quic: None,
             quic_reported: false,
             dropped_ports: HashSet::new(),
             out: vec![0; DATAGRAM],
@@ -367,12 +384,7 @@ impl Engine {
     /// Opens a listening socket for a new connection from `src` to `dst`, unless one exists.
     fn listen_for(&mut self, src: SocketAddr, dst: SocketAddr) {
         let IpAddr::V4(dst_ip) = dst.ip() else { return };
-        if dst_ip == SERVER_ADDR
-            || dst_ip.is_broadcast()
-            || dst_ip.is_multicast()
-            || dst_ip.is_unspecified()
-            || dst_ip.is_loopback()
-        {
+        if !terminable(dst_ip) {
             return;
         }
         let exists = self.conns.keys().any(|handle| {
@@ -413,7 +425,7 @@ impl Engine {
         );
     }
 
-    /// DNS goes to the host's resolver, QUIC and the rest of UDP is dropped.
+    /// DNS goes to the host's resolver, QUIC to the QUIC endpoint, the rest of UDP is dropped.
     fn udp(&mut self, client: Ipv4Addr, ip: &Ipv4Packet<&[u8]>) {
         let Ok(udp) = UdpPacket::new_checked(ip.payload()) else {
             return;
@@ -435,11 +447,23 @@ impl Engine {
                     self.inject_tx.clone(),
                 ));
             }
-            443 => {
-                if !self.quic_reported {
-                    self.quic_reported = true;
-                    self.report_quic(client, ip.dst_addr());
+            QUIC_PORT => {
+                let Some(quic) = &self.quic else {
+                    if !self.quic_reported {
+                        self.quic_reported = true;
+                        self.report_quic(client, ip.dst_addr());
+                    }
+                    return;
+                };
+                if !terminable(ip.dst_addr()) {
+                    return;
                 }
+                // A full queue drops the datagram, as a congested link would; QUIC resends.
+                let _ = quic.try_send(Datagram {
+                    from: SocketAddr::new(IpAddr::V4(client), udp.src_port()),
+                    to: ip.dst_addr(),
+                    payload: Bytes::copy_from_slice(udp.payload()),
+                });
             }
             port => self.report_dropped(port, "only DNS is relayed over UDP"),
         }
@@ -455,8 +479,8 @@ impl Engine {
             bytes_up: 0,
             bytes_down: 0,
             error: Some(
-                "UDP/443 (QUIC, HTTP/3) is dropped in WireGuard capture mode; clients fall back \
-                 to TCP. Reported once."
+                "UDP/443 (QUIC, HTTP/3) is dropped: the QUIC endpoint did not start; clients \
+                 fall back to TCP. Reported once."
                     .to_owned(),
             ),
             reason: None,
@@ -598,6 +622,16 @@ impl Engine {
     }
 }
 
+/// Whether connections to `dst` are terminated: not the tunnel's own address, broadcast,
+/// multicast, unspecified or loopback.
+fn terminable(dst: Ipv4Addr) -> bool {
+    !(dst == SERVER_ADDR
+        || dst.is_broadcast()
+        || dst.is_multicast()
+        || dst.is_unspecified()
+        || dst.is_loopback())
+}
+
 fn endpoint_addr(addr: IpAddress, port: u16) -> SocketAddr {
     match addr {
         IpAddress::Ipv4(v4) => SocketAddr::new(IpAddr::V4(v4), port),
@@ -675,7 +709,7 @@ async fn relay_dns(
 }
 
 /// An IPv4 UDP packet; `None` for IPv6 addresses.
-fn udp_packet(from: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn udp_packet(from: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
     let (IpAddr::V4(src), IpAddr::V4(dst)) = (from.ip(), to.ip()) else {
         return None;
     };

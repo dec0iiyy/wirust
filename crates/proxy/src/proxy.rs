@@ -54,7 +54,7 @@ pub(crate) type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Limit on the TLS handshake with the client.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pause after a failed accept, so running out of file descriptors does not spin.
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
@@ -222,6 +222,24 @@ impl State {
     /// The addresses no dial may reach (see [`Guard::check`]).
     pub(crate) fn guard(&self) -> &Guard {
         self.connector.guard()
+    }
+
+    /// One of the [`Config::max_clients`] slots, held while a QUIC connection is open;
+    /// `None` when all are taken.
+    #[cfg(feature = "wireguard")]
+    pub(crate) fn client_slot(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.client_slots).try_acquire_owned().ok()
+    }
+
+    /// The TLS configuration (leaf certificate) for `sni`, from the same cache the TCP path
+    /// uses; `None` for passthrough and `--decrypt-only` exclusions, so QUIC to those hosts
+    /// fails its handshake and the client falls back to TCP, which is relayed raw.
+    #[cfg(feature = "wireguard")]
+    pub(crate) fn quic_tls(&self, sni: &str) -> Option<Arc<rustls::ServerConfig>> {
+        if self.passthrough.current().tunnels(sni, 443, Some(sni)) {
+            return None;
+        }
+        self.certs.server_config(sni).ok()
     }
 }
 
@@ -771,6 +789,48 @@ pub(crate) async fn serve_transparent<S>(
         return;
     }
     tunnel(state, peer, host, dst.port(), Prefixed::new(raw, io)).await;
+}
+
+/// The server side of one HTTP/3 connection the WireGuard capture mode terminated: every
+/// request on it goes to `host:443` through [`forward`], over one pooled HTTP/2 or HTTP/1.1
+/// connection, like the requests of an intercepted TLS tunnel.
+#[cfg(feature = "wireguard")]
+#[derive(Debug)]
+pub(crate) struct QuicClient {
+    target: Target,
+    pool: Pool,
+}
+
+#[cfg(feature = "wireguard")]
+impl QuicClient {
+    /// The requests of a QUIC connection to `host` (its SNI), described by `tls`.
+    pub(crate) fn new(host: String, tls: ClientTls) -> Self {
+        Self {
+            target: Target {
+                scheme: "https",
+                server_name: host.clone(),
+                host,
+                port: 443,
+                offer_h2: true,
+                tls: Some(tls),
+            },
+            pool: Pool::default(),
+        }
+    }
+
+    /// Forwards one request of the connection, logging it when the response body ends.
+    pub(crate) async fn forward<B>(
+        &self,
+        state: &State,
+        peer: SocketAddr,
+        request: Request<B>,
+    ) -> Response<ProxyBody>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin + 'static,
+        B::Error: Into<BoxError> + std::fmt::Display,
+    {
+        forward(state, peer, &self.target, Some(&self.pool), request).await
+    }
 }
 
 /// Where a tunnel or request goes, and what the client leg looked like.
