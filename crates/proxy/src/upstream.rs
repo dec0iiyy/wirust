@@ -81,9 +81,12 @@ enum Via {
     Direct,
     /// A tunnel through the upstream proxy (CONNECT or SOCKS5).
     Tunnel,
-    /// An HTTP upstream proxy taking absolute-form requests, with its
-    /// `Proxy-Authorization` value.
-    Forward(Option<HeaderValue>),
+    /// An HTTP upstream proxy taking absolute-form requests for the server `authority`
+    /// (`host:port`), with its `Proxy-Authorization` value.
+    Forward {
+        auth: Option<HeaderValue>,
+        authority: String,
+    },
 }
 
 impl Sender {
@@ -113,8 +116,8 @@ impl Sender {
         &self,
         mut request: Request<ProxyBody>,
     ) -> hyper::Result<Response<Incoming>> {
-        if let Via::Forward(auth) = &self.via {
-            absolute_form(&mut request, auth.as_ref());
+        if let Via::Forward { auth, authority } = &self.via {
+            absolute_form(&mut request, authority, auth.as_ref());
         }
         match &self.conn {
             Conn::H1(sender) => {
@@ -129,18 +132,15 @@ impl Sender {
     }
 }
 
-/// Rewrites an origin-form HTTP/1.1 request to `http://host/path` for an HTTP proxy.
-fn absolute_form(request: &mut Request<ProxyBody>, auth: Option<&HeaderValue>) {
-    let host = request
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(str::to_owned);
+/// Rewrites an origin-form HTTP/1.1 request to `http://authority/path` for an HTTP proxy.
+/// `authority` is the server the connection was opened for, not the `Host` header, which a
+/// client or a rule may have set to something else.
+fn absolute_form(request: &mut Request<ProxyBody>, authority: &str, auth: Option<&HeaderValue>) {
     let path = request
         .uri()
         .path_and_query()
         .map_or("/", http::uri::PathAndQuery::as_str);
-    if let Some(uri) = host.and_then(|host| format!("http://{host}{path}").parse().ok()) {
+    if let Ok(uri) = format!("http://{authority}{path}").parse() {
         *request.uri_mut() = uri;
     }
     if let Some(auth) = auth {
@@ -224,7 +224,12 @@ pub(crate) async fn open_plain(
                     anyhow::Ok(value)
                 })
                 .transpose()?;
-            (stream, Via::Forward(auth))
+            let authority = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            (stream, Via::Forward { auth, authority })
         }
         _ => tcp(connector, host, port).await?,
     };

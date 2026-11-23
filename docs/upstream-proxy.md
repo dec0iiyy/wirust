@@ -20,7 +20,7 @@ SOCKS uses 1080. Characters such as `@` or `:` in the user name or password are 
 
 | Scheme | Tunnels (`https://`, passthrough, other CONNECT traffic, WebSocket upgrades) | Plain `http://` requests | Host names resolved by |
 |---|---|---|---|
-| `http://` | `CONNECT host:port` | absolute-form `GET http://host/path`, the proxy's credentials added as `Proxy-Authorization` | the upstream proxy |
+| `http://` | `CONNECT host:port` | absolute-form `GET http://host:port/path` naming the server the request goes to (after `map_remote`; never taken from `Host`), the proxy's credentials added as `Proxy-Authorization` | the upstream proxy |
 | `socks5://` | SOCKS5 `CONNECT` to an IP address | the same SOCKS5 tunnel | wirust |
 | `socks5h://` | SOCKS5 `CONNECT` to the host name | the same SOCKS5 tunnel | the upstream proxy |
 
