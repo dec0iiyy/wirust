@@ -14,6 +14,7 @@ built in parallel without editing the same functions.
 | `clock.rs` | UTC wall-clock formatting for record timestamps, without a date-time dependency |
 | `proxy.rs` | `Config`, `Proxy`: listener, CONNECT, TLS interception, forwarding, running the chain |
 | `hello.rs` | reads and replays the raw ClientHello (`peek`, `Prefixed`) |
+| `idle.rs` | client connection deadlines (`Watch`, `Watched`): request head, idleness, HTTP/2 preface; see "Client connection limits" |
 | `ca.rs`, `certs.rs` | the local CA, per-host leaf certificates and their cache |
 | `upstream.rs` | server connections (TLS, ALPN, timings) |
 | `upstream_proxy.rs` | `--upstream-proxy`: URL and redaction, bypass list, HTTP CONNECT and SOCKS5 clients |
@@ -128,6 +129,26 @@ empty, so ordinary traffic logs exactly the fields it did before.
 - **WebSocket messages** (`docs/websocket.md`): `proxy::join_upgrades` runs `ws::pump` for
   `Upgrade: websocket` (other upgrades are still copied byte for byte); it forwards unchanged
   bytes and publishes `FlowEvent::WsMessage`, which `FlowStore` keeps in its `WsStore`.
+
+## Client connection limits
+
+Constants in `idle.rs` and `proxy.rs`. They bound what clients that connect and then stall
+can hold; nothing that is moving bytes or waiting for its response is cut.
+
+| Limit | Value | Applies to |
+|---|---|---|
+| `idle::HEADER_TIMEOUT` | 30 s | an HTTP/1 request head: from the connection's start for the first request, from its first byte for later ones (slowloris, silent connections) |
+| `idle::IDLE_TIMEOUT` | 5 min | an HTTP/1 keep-alive connection between requests, an HTTP/2 connection with no open stream, a non-TLS CONNECT tunnel without a byte either way |
+| `idle::PREFACE_TIMEOUT` | 10 s | the HTTP/2 client preface after the TLS handshake |
+| `idle::H2_PING_INTERVAL`, `H2_PING_TIMEOUT` | 60 s, 20 s | HTTP/2 keep-alive PINGs; an unanswered one closes the connection |
+| `hello::HELLO_TIMEOUT` | 10 s | the rest of a started ClientHello |
+| `proxy::DEFAULT_MAX_CLIENTS` | 10,000 | client connections at once (`Config::max_clients`); a tunnel counts until it closes; more are answered `503` and closed, with one stderr line per run of refusals |
+
+A request in flight (from its head until its response body is done) has no deadline, so a
+slow download, a long poll, a WebSocket and a TLS tunnel are never closed for idleness. A
+request body trickled after a complete head is not limited either; the connection cap
+bounds how many of those can exist. TLS passthrough tunnels (`--passthrough`) are not
+closed for idleness.
 
 ## Known limits
 

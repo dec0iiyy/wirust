@@ -19,6 +19,12 @@
 | `--allow-remote` | | allow a non-loopback `--listen` or `--ui` address (dangerous) |
 | `--upstream-insecure` | | do not verify server certificates (dangerous) |
 
+Fixed limits on client connections (no flags; see "Client connection limits" in
+`docs/architecture.md`): a request head must arrive within 30 s, a connection with no
+request in flight (or a non-TLS tunnel without traffic) closes after 5 min, an HTTP/2
+preface must arrive within 10 s, and at most 10,000 client connections are served at once
+(more get `503`). Requests in flight, downloads, WebSockets and TLS tunnels are not cut.
+
 ## Changing traffic
 
 | Option | Meaning |
