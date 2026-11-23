@@ -110,7 +110,8 @@ upgrade.
   fragmented message of the same direction, so it may wait for that message's last frame.
   When it is written, it is recorded like any other message with `injected: true`.
   Answers: `202 {"queued": true}`; `404` unknown flow or not a WebSocket; `409` the
-  connection is closed; `400` a bad body or a type other than text and binary; `413` more
+  connection is closed, or a Close frame already went that way (queued messages for that
+  direction are dropped then); `400` a bad body or a type other than text and binary; `413` more
   than 64 KiB (`ws::MAX_INJECT`); `429` more than 20 messages per second per connection
   (`ws::INJECT_PER_SECOND`) or 16 waiting in one direction. After a protocol violation in a
   direction (see above) its framing is unknown, so waiting messages for it are dropped.
