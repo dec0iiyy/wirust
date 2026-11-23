@@ -1020,7 +1020,7 @@ where
     B::Error: Into<BoxError> + std::fmt::Display,
 {
     let mut body = None;
-    if !upgrade && state.interceptors.needs_request_body() {
+    if !upgrade && state.interceptors.wants_request_body(req) {
         match body::buffer(tee, state.body_limit).await {
             Ok(Buffered::Whole(bytes)) => req.body = Some(bytes),
             Ok(Buffered::TooLarge(rest)) => {
@@ -1075,7 +1075,7 @@ async fn intercept_response(
     };
     let mut body = None;
     let mut buffered = None;
-    if state.interceptors.needs_response_body() {
+    if state.interceptors.wants_response_body(request, &ctx) {
         match body::buffer(incoming, state.body_limit).await? {
             Buffered::Whole(bytes) => {
                 buffered = Some(bytes.clone());

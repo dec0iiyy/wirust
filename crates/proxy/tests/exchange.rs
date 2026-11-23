@@ -6,15 +6,16 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use common::{TestResult, spawn, temp_dir};
+use common::{TestResult, next_exchange, spawn, temp_dir};
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt as _, Empty};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+use wirust::flow::Flag;
 use wirust::intercept::BlockHost;
 use wirust::rules::{Rules, RulesFile};
 use wirust::{Config, Proxy};
@@ -230,5 +231,60 @@ action = { type = "rewrite_body", phase = "response", replace = [{ regex = "orig
     assert_eq!(length(&changed).as_deref(), Some("13"), "{changed:?}");
     let body = changed.into_body().collect().await?.to_bytes();
     assert_eq!(&body[..], b"from the rule");
+    Ok(())
+}
+
+#[tokio::test]
+async fn unmatched_streams_stream_while_body_rules_exist() -> TestResult {
+    let (port, _log) = origin().await?;
+    let mut running = start(
+        r#"
+[[rules]]
+name = "elsewhere"
+match = { host = "other.example" }
+action = { type = "rewrite_body", phase = "response", replace = [{ regex = "data", with = "x" }] }
+
+[[rules]]
+name = "elsewhere-request"
+match = { host = "other.example" }
+action = { type = "rewrite_body", replace = [{ regex = "a", with = "b" }] }
+
+[[rules]]
+name = "pause"
+match = { path = "/paused" }
+action = { type = "breakpoint", request = true, response = true }
+"#,
+    )
+    .await?;
+    let started = Instant::now();
+    let url = format!("http://127.0.0.1:{port}/sse");
+    let response = send(&running, Method::GET, &url, &[]).await?;
+    let head_at = started.elapsed();
+    let mut body = response.into_body();
+    let mut arrivals = Vec::new();
+    let mut text = String::new();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame?.into_data() {
+            arrivals.push(started.elapsed());
+            text.push_str(&String::from_utf8_lossy(&data));
+        }
+    }
+    let expected: Vec<String> = (0..EVENTS).map(|n| format!("data: {n}\n\n")).collect();
+    assert_eq!(text, expected.concat());
+    // Buffered, every event arrives at once after the last one was sent. Streamed, they
+    // arrive in order about EVENT_GAP apart; only the order and a half-gap spread are checked.
+    assert!(arrivals.len() >= 2, "one piece: {arrivals:?}");
+    let (first, last) = (arrivals[0], arrivals[arrivals.len() - 1]);
+    assert!(
+        last.saturating_sub(first) >= EVENT_GAP / 2,
+        "events arrived together: {arrivals:?}"
+    );
+    assert!(head_at < last, "head {head_at:?}, events {arrivals:?}");
+    let record = next_exchange(&mut running.events).await?;
+    assert!(
+        !record.flags.contains(&Flag::Rule("pause".to_owned())),
+        "{:?}",
+        record.flags
+    );
     Ok(())
 }

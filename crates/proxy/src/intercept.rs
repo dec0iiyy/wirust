@@ -106,6 +106,22 @@ pub trait Interceptor: Send + Sync {
         false
     }
 
+    /// Whether `on_request` needs the body of this request, asked before the chain runs with
+    /// the request as the client sent it. Defaults to [`Interceptor::needs_request_body`];
+    /// answering per exchange keeps every other request streaming.
+    fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        let _ = request;
+        self.needs_request_body()
+    }
+
+    /// Whether `on_response` needs the body of this response, asked when its head arrives,
+    /// before the chain runs. Defaults to [`Interceptor::needs_response_body`]; answering per
+    /// exchange keeps every other response (event streams, downloads) streaming.
+    fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        let _ = (request, response);
+        self.needs_response_body()
+    }
+
     /// Looks at or changes the request before it goes to the server.
     fn on_request(&self, request: &mut RequestCtx) -> Action {
         let _ = request;
@@ -161,6 +177,19 @@ impl Interceptors {
     #[must_use]
     pub fn needs_response_body(&self) -> bool {
         self.chain.iter().any(|i| i.needs_response_body())
+    }
+
+    /// Whether any interceptor needs the body of `request` buffered.
+    pub fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        self.chain.iter().any(|i| i.wants_request_body(request))
+    }
+
+    /// Whether any interceptor needs the body of `response` to `request` buffered.
+    #[must_use]
+    pub fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        self.chain
+            .iter()
+            .any(|i| i.wants_response_body(request, response))
     }
 
     /// Runs `on_request` of each interceptor, applying delays and pauses, until one responds.

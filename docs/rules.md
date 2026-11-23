@@ -116,9 +116,19 @@ Order inside one exchange: all matching `delay`s (summed), then rewrites, `map_r
 - `json_set` paths are dot-separated; numeric parts index arrays; missing objects are made.
   A body that is not JSON is left as it is.
 - Body rules buffer the body up to `--body-limit`. A larger body streams through unchanged
-  and the flow gets the `rewrite_skipped_body_too_large` flag. While any enabled body rule
-  or breakpoint of a phase exists, every intercepted exchange of that phase is buffered (up
-  to the limit).
+  and the flow gets the `rewrite_skipped_body_too_large` flag. Buffering is decided per
+  exchange: a request body is buffered only when a request-phase body rule or breakpoint
+  matches that request (decided before the body is read), a response body only when a
+  response-phase body rule or breakpoint matches the response head as the server sent it
+  (`status` and response `header` conditions included). Every other exchange streams as it
+  comes, `text/event-stream`, chunked streams and large downloads included, and its
+  response head is not held back. A response-phase breakpoint whose condition only matches
+  after an earlier rule changed the status or headers still pauses, with `not_buffered`.
+- HTTP/1.1 requests with an `Upgrade` header (WebSocket and others) run the request phase
+  like any other request, unbuffered: `block`, `map_local`, `map_remote`, header rewrites,
+  breakpoints and `--block-host` apply. After a `101` the connection is joined as it is.
+- Buffering a response never changes the `Content-Length` of a `HEAD`, `204` or `304`
+  answer, nor of a body the rules left unchanged.
 - A body with a `Content-Encoding` (gzip, deflate, br, zstd, or a list of them) is edited
   decoded. When the edits change it, it goes on as identity: `Content-Encoding` is removed and
   `Content-Length` set to the new size. When they change nothing, the original bytes go on.
@@ -165,9 +175,10 @@ rules before the breakpoint ran) and, for a response pause, the response:
 `--body-limit`: not buffered, it streams on unchanged unless an edit sets a new body) or
 `not_buffered`. A whole body comes as `text` when it is UTF-8 (at most 256 KiB, cut at a
 character boundary) or as `base64` of its first 4 KiB when it is not; `truncated` says
-whether anything was cut. Breakpoint rules make the proxy buffer request bodies (rules
-with `request = true`) and response bodies (`response = true`) up to `--body-limit`, as
-body rewrites do, so a pause can show them.
+whether anything was cut. A breakpoint rule makes the proxy buffer the request body (rules
+with `request = true`) and the response body (`response = true`) of the exchanges it
+matches, up to `--body-limit`, as body rewrites do, so a pause can show them; other
+exchanges are not buffered for it.
 
 The edit body:
 

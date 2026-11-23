@@ -367,6 +367,7 @@ impl RuleSet {
 
     fn from_rules(rules: Vec<Rule>) -> Self {
         // Body rewrites need the body; so do breakpoints, so the pause shows it for editing.
+        // A quick check: each exchange buffers only when such a rule matches it.
         fn wants(rules: &[Rule], phase: RulePhase) -> bool {
             rules
                 .iter()
@@ -1308,12 +1309,17 @@ impl Interceptor for MainStage {
         "rules"
     }
 
-    fn needs_request_body(&self) -> bool {
-        self.0.current().needs_request_body
+    fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        let snapshot = Snapshot::of(&self.0, request);
+        snapshot.set.needs_request_body
+            && (snapshot.request_rules()).any(|r| matches!(r.action, Act::Body(..)))
     }
 
-    fn needs_response_body(&self) -> bool {
-        self.0.current().needs_response_body
+    fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        request.extensions.get::<Snapshot>().is_some_and(|s| {
+            s.set.needs_response_body
+                && (s.response_rules(response).iter()).any(|r| matches!(r.action, Act::Body(..)))
+        })
     }
 
     fn on_request(&self, request: &mut RequestCtx) -> Action {
@@ -1379,6 +1385,21 @@ struct BreakpointStage(Rules, Pauses);
 impl Interceptor for BreakpointStage {
     fn name(&self) -> &'static str {
         "rules:breakpoint"
+    }
+
+    // A pause shows the body for editing, so only the exchanges it holds are buffered.
+    fn wants_request_body(&self, request: &mut RequestCtx) -> bool {
+        let snapshot = Snapshot::of(&self.0, request);
+        snapshot.set.needs_request_body
+            && (snapshot.request_rules()).any(|r| matches!(r.action, Act::Breakpoint { .. }))
+    }
+
+    fn wants_response_body(&self, request: &RequestCtx, response: &ResponseCtx) -> bool {
+        request.extensions.get::<Snapshot>().is_some_and(|s| {
+            s.set.needs_response_body
+                && (s.response_rules(response).iter())
+                    .any(|r| matches!(r.action, Act::Breakpoint { .. }))
+        })
     }
 
     fn on_request(&self, request: &mut RequestCtx) -> Action {
