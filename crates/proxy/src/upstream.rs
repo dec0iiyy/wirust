@@ -201,12 +201,13 @@ async fn tcp(
     Ok((stream, Via::Direct))
 }
 
-/// Opens a TLS connection to `host:port`, offering h2 when `offer_h2`.
+/// Opens a TLS connection to `host:port`, sending and verifying the server name `name`
+/// (the client's SNI), offering h2 when `offer_h2`.
 pub(crate) async fn open_tls(
     connector: &Connector,
     peer: IpAddr,
-    host: &str,
-    port: u16,
+    (host, port): (&str, u16),
+    name: &str,
     offer_h2: bool,
     upgrades: bool,
 ) -> anyhow::Result<Opened> {
@@ -218,7 +219,7 @@ pub(crate) async fn open_tls(
     } else {
         &connector.h1
     };
-    let name = ServerName::try_from(host.to_owned()).context("invalid server name")?;
+    let name = ServerName::try_from(name.to_owned()).context("invalid server name")?;
     let tls = TlsConnector::from(Arc::clone(config))
         .connect(name, tcp)
         .await

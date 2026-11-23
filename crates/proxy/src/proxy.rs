@@ -705,12 +705,14 @@ impl Target {
         upgrades: bool,
     ) -> anyhow::Result<Opened> {
         if self.scheme == "https" {
-            let host = if self.server_name.is_empty() {
+            // The CONNECT host is dialled (and checked); the SNI only names the certificate.
+            let name = if self.server_name.is_empty() {
                 &self.host
             } else {
                 &self.server_name
             };
-            upstream::open_tls(connector, peer, host, self.port, self.offer_h2, upgrades).await
+            let server = (self.host.as_str(), self.port);
+            upstream::open_tls(connector, peer, server, name, self.offer_h2, upgrades).await
         } else {
             upstream::open_plain(connector, peer, &self.host, self.port, upgrades).await
         }

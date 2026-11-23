@@ -10,6 +10,8 @@ use common::*;
 use http::{Request, StatusCode};
 use http_body_util::{BodyExt as _, Full};
 use hyper_util::rt::TokioIo;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject as _;
 use tokio::net::TcpStream;
 use wirust::flow::{Event, TlsFailure};
 use wirust::{Config, Proxy, RemoteAccess, UpstreamTls};
@@ -50,6 +52,35 @@ async fn exchange_over(alpn: &[u8], version: &str) -> TestResult {
     assert_eq!(tls.sni.as_deref(), Some("localhost"));
     assert_eq!(tls.alpn.as_deref().map(str::as_bytes), Some(alpn));
     assert_eq!(tls.ja3_hash.len(), 32);
+    Ok(())
+}
+
+/// The CONNECT host is dialled; the SNI only names the certificate the server must show.
+#[tokio::test]
+async fn an_intercepted_tunnel_dials_the_connect_host_not_the_sni() -> TestResult {
+    // The reserved `.invalid` name never resolves, so dialling the SNI would fail.
+    let sni = "wirust-sni.invalid";
+    let certs = upstream_certs_for(&[sni])?;
+    let port = https_server_with_alpn(&certs, &[b"http/1.1"]).await?;
+    let mut proxy = start_proxy(&certs.ca, 1024).await?;
+    let ca = CertificateDer::from_pem_slice(proxy.ca_pem.as_bytes())?;
+    let tls = tunnel_with_sni(proxy.addr, ("127.0.0.1", port), sni, &[ca], b"http/1.1").await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
+    tokio::spawn(connection);
+    let request = Request::builder()
+        .uri("/dialled")
+        .header("host", sni)
+        .body(Full::new(Bytes::new()))?;
+    let response = sender.send_request(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(
+        (status, &body[..]),
+        (StatusCode::OK, &b"hello from /dialled"[..])
+    );
+    let record = next_exchange(&mut proxy.events).await?;
+    assert_eq!(record.url, format!("https://127.0.0.1:{port}/dialled"));
+    assert_eq!(record.tls.and_then(|tls| tls.sni).as_deref(), Some(sni));
     Ok(())
 }
 

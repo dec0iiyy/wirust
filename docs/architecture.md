@@ -47,7 +47,9 @@ built in parallel without editing the same functions.
    `http://` request. Targets the guard refuses (`access::Guard`, see the security table)
    get `403` (`508` for the proxy's own listener); `wirust.test` goes to `magic::respond`.
 2. CONNECT: `tunnel` peeks the ClientHello, fingerprints it, issues a leaf, accepts TLS and
-   serves h2 or HTTP/1.1. Each request calls `forward`.
+   serves h2 or HTTP/1.1. Each request calls `forward`. The server connection goes to the
+   CONNECT host and port; the SNI is only the name the server's certificate is checked
+   against.
 3. `forward` builds the `Exchange` record and publishes `FlowEvent::Started`.
 4. With interceptors registered (and not a WebSocket upgrade), `intercept_request` buffers the
    request body if any interceptor `needs_request_body` (up to `--body-limit`; over it the body
