@@ -79,15 +79,18 @@ peer's tunnel address and port as the flow's client:
 QUIC to UDP port 443 is terminated by one in-process quinn endpoint that answers for every
 destination address; replies leave from the address the phone sent to. The handshake uses
 TLS 1.3 with ALPN `h3` and the same per-SNI leaf certificate from the wirust CA as the TCP
-path. Each HTTP/3 request then goes through the same forwarding code as a request in an
-intercepted TLS tunnel, so rules, breakpoints, scripts, HAR export, replay and MCP see it as
-usual. In the flow:
+path. Each HTTP/3 request then goes through the same forwarding code (`forward`) as a
+request in an intercepted TLS tunnel, so the interceptor chain (rules, breakpoints, scripts)
+and the flow store behind HAR export, replay and MCP get it like any other request. The tests
+prove this only for a map-remote interceptor and the flow record. In the flow:
 
 - the client leg is `h3` (the flow's client version), with ALPN `h3` and the SNI in the TLS
   details; the client is the peer's tunnel address and UDP port;
 - the upstream leg is **not** HTTP/3: wirust connects to the SNI name over TCP and speaks
-  HTTP/2 or HTTP/1.1, and the requests of one QUIC connection reuse the server connection
-  as the requests of one intercepted tunnel do. Native HTTP/3 to the server is not built;
+  HTTP/2 or HTTP/1.1 (TLS to the server is the TCP proxy's code; the tests cover it with a
+  local TLS server reached through map-remote), and the requests of one QUIC connection
+  reuse the server connection as the requests of one intercepted tunnel do. Native HTTP/3
+  to the server is not built;
 - there is no JA4 or JA3: quinn does not expose the ClientHello, so these fields are empty.
 
 What is not decrypted:
@@ -96,18 +99,41 @@ What is not decrypted:
   no certificate, so its handshake fails (the client sees a TLS error) and the client is
   expected to retry over TCP, where the passthrough relays it raw. QUIC itself is never
   relayed raw.
-- **No SNI**: no certificate either, same result.
-- An SNI naming a refused address (`localhost`, a loopback literal) completes the handshake
-  but the connection is closed before any request is forwarded.
+- **No SNI**: no certificate either, same result. This includes a client that dials an IP
+  address: an IP literal is not a valid SNI, so the client sends none.
+- An SNI such as `localhost` that names a refused address completes the handshake, but the
+  connection is closed (`H3_REQUEST_REJECTED`) before any request is forwarded.
+
+A failed handshake (passthrough or `--decrypt-only` host, no SNI, a client that rejects the
+certificate, a timeout) becomes a `TLS-FAIL` record with the reason prefixed `QUIC:`, folded
+on the console like the TCP path's. It has no SNI and no JA4: quinn reports neither for a
+failed handshake.
 
 `Alt-Svc` response headers and the DNS answers the relay passes on (including HTTPS records
-that advertise `alpn=h3`) are left as the server sent them, so a phone keeps trying HTTP/3 and
-lands in the QUIC endpoint.
+that advertise `alpn=h3`) are left as the server sent them, so a client keeps trying HTTP/3.
+Whether a real client then accepts the wirust CA for QUIC is untested: some browsers and
+network stacks refuse QUIC certificates that chain to a root they do not ship and fall back
+to TCP, which is captured as usual. No real browser or phone has been tried.
 
-Each QUIC connection takes one of the client slots of the HTTP listener (10 000); when none
-is free the connection is refused. A QUIC connection with no traffic is
-closed after 5 minutes (quinn's idle timeout), the handshake after 10 seconds. Datagrams the
-endpoint cannot take fast enough are dropped, as on a congested link.
+Limits per connection and for the endpoint:
+
+| Limit | Value | Why |
+|---|---|---|
+| Handshakes in progress | 64 (more are refused) | a flood of Initials cannot take the client slots |
+| Open connections | one client slot each, shared with the HTTP listener (10 000), taken once the handshake completes | same bound as proxy clients |
+| Handshake time | 10 s | as for TLS on the TCP path |
+| Idle time | at most 5 minutes (shorter when the client asks for less) | quinn's idle timeout; it does not count requests waiting at a breakpoint, so a pause longer than that loses the connection |
+| Request header section | 256 KiB | h3 buffers it whole |
+| Flow-control window | 1 MiB per request stream, 4 MiB per connection | bounds what a client can make wirust buffer |
+| Concurrent requests | 64 per connection; more wait | |
+| Unidirectional streams | 8 (HTTP/3 needs 3) | room for the reserved streams clients send |
+| UDP payload | 1200 bytes, MTU discovery off | fits the tunnel MTU (1420) with IPv4 and UDP headers |
+
+Datagrams from the phone that the endpoint cannot take fast enough (a queue of 256) are
+dropped, as on a congested link. Replies wait instead: when the queue of packets to encrypt
+for the peers (256, shared with DNS answers) is full, quinn holds its next datagram until
+there is room. When a QUIC connection closes, its requests still in flight are cancelled
+(including the request to the server); after a GOAWAY they finish first.
 
 ## Threat model
 
@@ -154,5 +180,8 @@ A WireGuard listener is a network service. What guards it:
 stack in the test process, over UDP on `127.0.0.1`: an HTTP request through the tunnel
 becomes a flow with the peer's tunnel address as its client, and a handshake from an unknown
 key gets no answer. A quinn and `h3` client in the same process sends HTTP/3 through the
-tunnel: a GET and a POST with a body become `h3` flows, and QUIC to a passthrough host fails
-its handshake for lack of a certificate. No network device is created.
+tunnel: a GET and a POST with a body become `h3` flows, also with a TLS server (HTTP/2) on
+the upstream leg; QUIC to a passthrough host, to a host outside `--decrypt-only` and without
+SNI fails its handshake (a passthrough refusal is checked for its `TLS-FAIL` record), a
+`localhost` SNI is closed without requests, and closing the QUIC connection cancels the
+request waiting at the server. No network device is created.

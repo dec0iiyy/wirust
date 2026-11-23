@@ -6,9 +6,10 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
    fall back to h2 or HTTP/1.1. It needs a transparent mode (a WireGuard-style entry point)
    or MASQUE (`CONNECT-UDP`). The same mode would catch apps that ignore the system proxy.
    An experimental WireGuard capture mode behind the cargo feature `wireguard` (not in release
-   binaries) terminates TCP and QUIC (`docs/wireguard.md`): HTTP/3 requests from the phone
-   become flows. Not built yet: HTTP/3 to the server (the server leg is HTTP/2 or HTTP/1.1),
-   JA4 for QUIC clients, and a test with a real phone.
+   binaries) terminates TCP and QUIC (`docs/wireguard.md`): HTTP/3 requests from clients that
+   accept the wirust CA for QUIC become flows (tested in process only). Not built yet: HTTP/3
+   to the server (the server leg is HTTP/2 or HTTP/1.1), JA4 for QUIC clients, and a test
+   with real browsers and phones.
 2. Testing on real phones and on iOS: `docs/mobile.md` was tried only on the Android emulator.
 3. Passthrough patterns in the web UI (replay and compose are there).
 4. WebSocket: editing or dropping messages in flight (breakpoints on messages).
