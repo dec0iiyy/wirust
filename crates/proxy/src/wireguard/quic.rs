@@ -67,10 +67,9 @@ pub(super) fn start(
         incoming: Mutex::new(rx),
         inject,
     });
-    let mut tls =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(Certs(Arc::clone(&state))));
+    let mut tls = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(Certs(Arc::clone(&state))));
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     let mut transport = quinn::TransportConfig::default();
@@ -127,7 +126,11 @@ async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incomin
         return;
     };
     // An SNI naming a refused address (`localhost`, a loopback literal) gets no requests.
-    if state.guard().check_name(peer.ip(), &host, QUIC_PORT).is_err() {
+    if state
+        .guard()
+        .check_name(peer.ip(), &host, QUIC_PORT)
+        .is_err()
+    {
         connection.close(0_u32.into(), b"");
         return;
     }
@@ -253,7 +256,10 @@ impl AsyncUdpSocket for TunnelSocket {
             return Ok(());
         };
         let from = SocketAddr::new(source, QUIC_PORT);
-        let size = transmit.segment_size.unwrap_or(transmit.contents.len()).max(1);
+        let size = transmit
+            .segment_size
+            .unwrap_or(transmit.contents.len())
+            .max(1);
         for segment in transmit.contents.chunks(size) {
             if let Some(packet) = udp_packet(from, transmit.destination, segment) {
                 // A full queue drops the datagram, as a congested link would; QUIC resends.
@@ -302,7 +308,10 @@ impl AsyncUdpSocket for TunnelSocket {
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), QUIC_PORT))
+        Ok(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            QUIC_PORT,
+        ))
     }
 }
 
