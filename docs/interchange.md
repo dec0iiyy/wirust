@@ -130,7 +130,7 @@ Quote values with spaces: `body:"free text"` (`\"` and `\\` escape inside quotes
 | `type:json` | response `Content-Type` contains it (`js` = javascript, `image`/`img` = `image/`) |
 | `header:content-type=json` | a request or response header with that name whose value contains the text |
 | `header:authorization` | the header is present |
-| `body:"free text"` | request or response body contains it (first 1 MiB of each stored body, which is the decoded body for `Content-Encoding`; base64 bodies are decoded) |
+| `body:"free text"` | request or response body contains it, ignoring ASCII case (only the first 256 KiB of each stored body are searched, so a search over a full store stays fast; that is the decoded body for `Content-Encoding`, and base64 bodies are decoded first) |
 | `size:>10k` | response body size; `b`, `k`, `m`, `g` (powers of 1024) |
 | `time:>500ms` | total time; `ms` (default) or `s` |
 | `client:curl` | the known TLS client or the `User-Agent` contains it |
