@@ -21,7 +21,7 @@ it prints what it will do and the CA's SHA-256 fingerprint and waits for you to 
 
 | Platform | install | uninstall |
 |---|---|---|
-| macOS | `security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db` (macOS asks for your password) | `security remove-trusted-cert`, then `security delete-certificate -Z <SHA-1>` on the login keychain |
+| macOS | `security add-trusted-cert -r trustRoot -p ssl -k ~/Library/Keychains/login.keychain-db` (macOS asks for your password; `-p ssl` limits the trust to TLS server certificates) | `security remove-trusted-cert`, then `security delete-certificate -Z <SHA-1>` on the login keychain |
 | Windows | `certutil -user -addstore Root` (Windows shows a confirmation dialog) | `certutil -user -delstore Root <SHA-1>` |
 | Linux | prints the commands for Debian/Ubuntu, Fedora/RHEL and Arch (they need `sudo`), for the NSS store Chrome uses, and the Firefox menu path | prints the matching removal commands |
 
@@ -29,6 +29,12 @@ it prints what it will do and the CA's SHA-256 fingerprint and waits for you to 
 directory: on macOS it first looks the certificate up by SHA-256 in the login keychain and
 does nothing when it is not there; on Windows it checks with `certutil -user -store Root
 <SHA-1>`, which tests presence, not chain validity.
+
+What you trust: the CA is valid for 10 years and has no name constraints, so it can sign a
+certificate for any host. Its key never leaves the config directory, but while the CA is
+trusted, whoever gets that key can intercept this machine's TLS. Run `wirust ca uninstall`
+(or the removal commands above) when you stop using the proxy; deleting the config
+directory afterwards makes the next run create a new CA.
 
 `status` says `trusted` or `not trusted` on macOS (the certificate is in the login keychain)
 and Windows (it is in the user's Root store). On Linux it reports `trusted` when the CA sits

@@ -126,6 +126,9 @@ impl<R: CommandRunner> CaTrust<R> {
                         "add-trusted-cert",
                         "-r",
                         "trustRoot",
+                        // Trusted for TLS server certificates only, not S/MIME or code signing.
+                        "-p",
+                        "ssl",
                         "-k",
                         &keychain,
                         &path,
@@ -369,7 +372,7 @@ mod tests {
         assert_eq!(
             ca.runner().writes(),
             [format!(
-                "security add-trusted-cert -r trustRoot -k {} /cfg/ca-cert.pem",
+                "security add-trusted-cert -r trustRoot -p ssl -k {} /cfg/ca-cert.pem",
                 keychain()
             )]
         );

@@ -1022,7 +1022,7 @@ you stop using the proxy. Anyone with the CA key ({NAME} keeps it next to the ce
 can impersonate any site to this machine.
 
 macOS (system keychain, asks for your password):
-  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \"{path}\"
+  sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain \"{path}\"
   remove: sudo security remove-trusted-cert -d \"{path}\"
 
 Linux, Debian/Ubuntu:
