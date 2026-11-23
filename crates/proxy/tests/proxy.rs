@@ -194,3 +194,104 @@ async fn non_loopback_bind_needs_allow_remote() -> TestResult {
     assert!(!dir.exists(), "no CA is created for a refused start");
     Ok(())
 }
+
+/// Absolute-form requests on one client connection reuse one server connection instead of
+/// opening (and leaving in `TIME_WAIT`) one per request.
+#[tokio::test]
+async fn plain_requests_on_one_connection_share_a_server_connection() -> TestResult {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let ok = |_| async {
+                Ok::<_, std::convert::Infallible>(http::Response::new(Full::new(
+                    Bytes::from_static(b"ok"),
+                )))
+            };
+            tokio::spawn(
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(tcp), hyper::service::service_fn(ok)),
+            );
+        }
+    });
+    let certs = upstream_certs()?;
+    let proxy = start_proxy(&certs.ca, 1024).await?;
+    let client = TokioIo::new(TcpStream::connect(proxy.addr).await?);
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(client).await?;
+    tokio::spawn(connection);
+    for _ in 0..3 {
+        let request = Request::get(format!("http://127.0.0.1:{port}/"))
+            .header(http::header::HOST, format!("127.0.0.1:{port}"))
+            .body(Full::new(Bytes::new()))?;
+        let response = sender.send_request(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await?;
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 1, "one server connection");
+    Ok(())
+}
+
+/// Running out of file descriptors is not fatal: the proxy keeps running and accepts again
+/// once descriptors are free.
+#[cfg(unix)]
+#[test]
+fn out_of_file_descriptors_does_not_stop_the_proxy() -> TestResult {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let dir = temp_dir();
+    let mut proxy = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"ulimit -n 64 && exec "$0" --listen 127.0.0.1:0 --config-dir "$1""#)
+        .arg(env!("CARGO_BIN_EXE_wirust"))
+        .arg(&dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stderr = BufReader::new(proxy.stderr.take().expect("piped stderr"));
+    let mut line = String::new();
+    let addr = loop {
+        line.clear();
+        anyhow::ensure!(
+            stderr.read_line(&mut line)? > 0,
+            "the proxy exited at start"
+        );
+        if let Some(rest) = line.split("listening on ").nth(1) {
+            break rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+        }
+    };
+    // Keep reading stderr so the proxy never blocks on a full pipe.
+    std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    let clients: Vec<std::net::TcpStream> = (0..100)
+        .filter_map(|_| std::net::TcpStream::connect(&addr).ok())
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let exited = proxy.try_wait()?;
+    drop(clients);
+    std::thread::sleep(Duration::from_millis(500));
+    let answer = (|| -> std::io::Result<String> {
+        let mut client = std::net::TcpStream::connect(&addr)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.write_all(b"GET http://wirust.test/ HTTP/1.1\r\nHost: wirust.test\r\n\r\n")?;
+        let mut head = [0; 12];
+        client.read_exact(&mut head)?;
+        Ok(String::from_utf8_lossy(&head).into_owned())
+    })();
+    let _ = proxy.kill();
+    let _ = proxy.wait();
+    std::fs::remove_dir_all(&dir)?;
+    assert!(exited.is_none(), "the proxy exited: {exited:?}");
+    assert!(answer?.starts_with("HTTP/1.1 "), "the proxy answers again");
+    Ok(())
+}
