@@ -64,13 +64,17 @@ boringtun = { version = "0.7.1", default-features = false, optional = true }
 # 0.12: 0.13 and later need Rust 1.91, above the workspace's rust-version.
 smoltcp = { version = "0.12.0", default-features = false, optional = true, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
 # HTTP/3 in the WireGuard capture mode: QUIC is terminated in process. quinn without its
-# default features, so rustls keeps the aws-lc-rs provider and ring stays out.
+# default features, so rustls keeps aws-lc-rs as its only provider (ring is still linked,
+# for boringtun's own crypto).
 quinn = { version = "0.11.12", default-features = false, optional = true, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 h3 = { version = "0.0.8", optional = true }
 h3-quinn = { version = "0.0.10", optional = true }
 
 [features]
-# Experimental and off by default: release builds do not include it.
+# The experimental WireGuard capture mode is on by default, so release builds and
+# `cargo install` include it; it only starts with `wirust wireguard`.
+# `--no-default-features` builds a binary without it.
+default = ["wireguard"]
 wireguard = [
     "dep:boringtun",
     "dep:smoltcp",

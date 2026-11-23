@@ -44,7 +44,7 @@ allow = [
     "Zlib",
 ]
 
-# Only in the experimental `wireguard` feature (off by default): smoltcp and its `managed`
+# Only in the experimental `wireguard` feature (on by default): smoltcp and its `managed`
 # are 0BSD, boringtun's `ip_network` crates BSD-2-Clause. Both are permissive.
 [[licenses.exceptions]]
 crate = "smoltcp"
