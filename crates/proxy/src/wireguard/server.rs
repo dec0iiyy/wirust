@@ -51,6 +51,9 @@ const TCP_BUFFER: usize = 64 * 1024;
 /// How long a relayed DNS query waits for the host's resolver.
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Packets waiting to be encrypted for the peers (DNS answers, QUIC datagrams).
+const INJECT_QUEUE: usize = 256;
+
 /// Largest UDP datagram.
 const DATAGRAM: usize = 65_535;
 
@@ -131,7 +134,8 @@ impl Server {
             resolver,
         } = self;
         let (down_tx, mut down_rx) = mpsc::channel(256);
-        let (inject_tx, mut inject_rx) = mpsc::channel(64);
+        // Packets from the DNS relay and the QUIC endpoint; QUIC waits when it is full.
+        let (inject_tx, mut inject_rx) = mpsc::channel(INJECT_QUEUE);
         let quic = match quic::start(Arc::clone(&state), inject_tx.clone()) {
             Ok(quic) => Some(quic),
             Err(e) => {

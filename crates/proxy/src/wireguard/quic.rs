@@ -8,6 +8,7 @@
 //! over TCP and every interceptor sees the request as usual.
 
 use std::fmt;
+use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -24,11 +25,12 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Incoming, UdpPoller};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use super::server::udp_packet;
-use crate::flow::ClientTls;
+use crate::clock::Utc;
+use crate::flow::{ClientTls, Event, TlsFailure};
 use crate::idle;
 use crate::proxy::{HANDSHAKE_TIMEOUT, ProxyBody, QuicClient, State};
 
@@ -40,6 +42,32 @@ const QUEUE: usize = 256;
 
 /// Request body chunks buffered between the HTTP/3 stream and the forwarding path.
 const BODY_CHUNKS: usize = 4;
+
+/// QUIC handshakes in progress at once. Separate from the client slots, so a peer that
+/// floods Initials cannot take the slots the HTTP listener needs.
+const MAX_HANDSHAKES: usize = 64;
+
+/// Largest request header section a client may send (QPACK-decoded), in bytes.
+const MAX_HEADERS: u64 = 256 * 1024;
+
+/// Bytes a client may have in flight on one request stream, and on the whole connection.
+const STREAM_WINDOW: u32 = 1024 * 1024;
+const CONNECTION_WINDOW: u32 = 4 * 1024 * 1024;
+
+/// Concurrent request streams per connection; more wait for the client's flow control.
+const MAX_REQUESTS: u32 = 64;
+
+/// Unidirectional streams per connection: HTTP/3 needs three (control, QPACK encoder and
+/// decoder); the rest leaves room for the reserved "grease" streams clients send.
+const MAX_UNI_STREAMS: u32 = 8;
+
+/// UDP payload QUIC sends: the QUIC minimum, which fits the tunnel MTU (1420) with the IPv4
+/// and UDP headers (28 bytes) to spare.
+const UDP_PAYLOAD: u16 = 1200;
+
+/// HTTP/3 error code a connection is closed with when its SNI names a refused address
+/// (`H3_REQUEST_REJECTED`, RFC 9114).
+const REJECTED: u32 = 0x10b;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -73,9 +101,8 @@ pub(super) fn start(
         .with_cert_resolver(Arc::new(Certs(Arc::clone(&state))));
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(idle::IDLE_TIMEOUT.try_into()?));
-    config.transport_config(Arc::new(transport));
+    config.transport_config(Arc::new(transport()?));
+    config.max_incoming(MAX_HANDSHAKES);
     let endpoint = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
         Some(config),
@@ -86,9 +113,28 @@ pub(super) fn start(
     Ok(tx)
 }
 
-/// Accepts connections until the endpoint closes. Each one takes a client slot, like a
-/// connection to the HTTP proxy listener; destinations the guard refuses get no answer.
+/// The per-connection limits; see `docs/wireguard.md`.
+fn transport() -> anyhow::Result<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    // At most: the client's own idle timeout applies when it is shorter.
+    transport.max_idle_timeout(Some(idle::IDLE_TIMEOUT.try_into()?));
+    transport.stream_receive_window(STREAM_WINDOW.into());
+    transport.receive_window(CONNECTION_WINDOW.into());
+    transport.max_concurrent_bidi_streams(MAX_REQUESTS.into());
+    transport.max_concurrent_uni_streams(MAX_UNI_STREAMS.into());
+    // The tunnel MTU is fixed, and quinn's MTU discovery would probe past it: datagrams stay
+    // at the QUIC minimum instead.
+    transport.mtu_discovery_config(None);
+    transport.initial_mtu(UDP_PAYLOAD);
+    transport.min_mtu(UDP_PAYLOAD);
+    Ok(transport)
+}
+
+/// Accepts connections until the endpoint closes. A handshake takes one of
+/// [`MAX_HANDSHAKES`] permits; a completed connection then takes a client slot, like a
+/// connection to the HTTP proxy listener. Destinations the guard refuses get no answer.
 async fn accept(endpoint: Endpoint, state: Arc<State>) {
+    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     while let Some(incoming) = endpoint.accept().await {
         let peer = incoming.remote_address();
         let Some(local) = incoming.local_ip() else {
@@ -103,37 +149,67 @@ async fn accept(endpoint: Endpoint, state: Arc<State>) {
             incoming.ignore();
             continue;
         }
-        let Some(slot) = state.client_slot() else {
+        let Ok(permit) = Arc::clone(&handshakes).try_acquire_owned() else {
             incoming.refuse();
             continue;
         };
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            serve_connection(state, peer, incoming).await;
-            drop(slot);
-        });
+        tokio::spawn(handshake(Arc::clone(&state), peer, local, incoming, permit));
     }
 }
 
-/// Completes the handshake and serves the connection's requests, each on its own task;
-/// returns when the connection and all its requests are done.
-async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incoming) {
-    let Ok(Ok(connection)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await else {
-        return;
+/// Completes one handshake under `permit`, then serves the connection under a client slot.
+/// A failed handshake becomes a `TLS-FAIL` record, as on the TCP path.
+async fn handshake(
+    state: Arc<State>,
+    peer: SocketAddr,
+    local: IpAddr,
+    incoming: Incoming,
+    permit: OwnedSemaphorePermit,
+) {
+    let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await;
+    drop(permit);
+    let reason = match result {
+        Ok(Ok(connection)) => {
+            let Some(slot) = state.client_slot() else {
+                connection.close(REJECTED.into(), b"too many clients");
+                return;
+            };
+            serve_connection(state, peer, connection).await;
+            return drop(slot);
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "handshake timed out".to_owned(),
     };
+    state.emit(Event::TlsFailure(TlsFailure {
+        id: state.next_id(),
+        time: Utc::now().rfc3339(),
+        client: peer,
+        target: SocketAddr::new(local, QUIC_PORT).to_string(),
+        // quinn reports neither the SNI nor the ClientHello of a failed handshake.
+        sni: None,
+        ja4: String::new(),
+        known_client: None,
+        reason: format!("QUIC: {reason}"),
+    }));
+}
+
+/// Serves the connection's requests, each on its own task; returns when the connection and
+/// all its requests are done.
+async fn serve_connection(state: Arc<State>, peer: SocketAddr, connection: quinn::Connection) {
     let Some(host) = (connection.handshake_data())
         .and_then(|data| data.downcast::<HandshakeData>().ok())
         .and_then(|data| data.server_name)
     else {
         return;
     };
-    // An SNI naming a refused address (`localhost`, a loopback literal) gets no requests.
+    // An SNI naming a refused address (`localhost`) gets no requests. An IP literal is not
+    // a valid SNI: the client sends none and the handshake already failed.
     if state
         .guard()
         .check_name(peer.ip(), &host, QUIC_PORT)
         .is_err()
     {
-        connection.close(0_u32.into(), b"");
+        connection.close(REJECTED.into(), b"");
         return;
     }
     let tls = ClientTls {
@@ -146,8 +222,13 @@ async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incomin
         client: None,
     };
     let client = Arc::new(QuicClient::new(host, tls));
+    let closed = connection.clone();
     let quic = h3_quinn::Connection::new(connection);
-    let Ok(mut h3) = h3::server::Connection::<_, Bytes>::new(quic).await else {
+    let Ok(mut h3) = h3::server::builder()
+        .max_field_section_size(MAX_HEADERS)
+        .build::<_, Bytes>(quic)
+        .await
+    else {
         return;
     };
     let mut requests = JoinSet::new();
@@ -162,9 +243,13 @@ async fn serve_connection(state: Arc<State>, peer: SocketAddr, incoming: Incomin
             resolver,
         ));
     }
-    // Dropping `h3` closes the connection: requests still in flight (after a GOAWAY) finish
-    // first.
-    while requests.join_next().await.is_some() {}
+    // After a GOAWAY the requests in flight finish; once the connection is gone they are
+    // cancelled, as hyper drops a request's future when its TCP client disconnects.
+    tokio::select! {
+        () = async { while requests.join_next().await.is_some() {} } => {}
+        _ = closed.closed() => requests.shutdown().await,
+    }
+    // Dropping `h3` closes the connection.
     drop(h3);
 }
 
@@ -270,7 +355,10 @@ struct TunnelSocket {
 
 impl AsyncUdpSocket for TunnelSocket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        Box::pin(Writable)
+        Box::pin(Writable {
+            inject: self.inject.clone(),
+            room: Mutex::new(None),
+        })
     }
 
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
@@ -283,9 +371,14 @@ impl AsyncUdpSocket for TunnelSocket {
             .segment_size
             .unwrap_or(transmit.contents.len())
             .max(1);
+        // A full queue pushes back: quinn keeps the datagram and waits for `Writable`.
+        if self.inject.capacity() < transmit.contents.len().div_ceil(size) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         for segment in transmit.contents.chunks(size) {
             if let Some(packet) = udp_packet(from, transmit.destination, segment) {
-                // A full queue drops the datagram, as a congested link would; QUIC resends.
+                // Only this endpoint sends with full capacity checked; a DNS answer that took
+                // the room meanwhile drops this datagram, and QUIC resends it.
                 let _ = self.inject.try_send(packet);
             }
         }
@@ -338,12 +431,38 @@ impl AsyncUdpSocket for TunnelSocket {
     }
 }
 
-/// Sending never blocks: a full queue drops the datagram instead.
-#[derive(Debug)]
-struct Writable;
+/// A wait for room in the loop's packet queue.
+type Room = Pin<Box<dyn Future<Output = Result<(), mpsc::error::SendError<()>>> + Send>>;
+
+/// Ready when the loop's packet queue has room again.
+struct Writable {
+    inject: mpsc::Sender<Vec<u8>>,
+    /// The wait in progress; behind a lock only because quinn wants the poller `Sync`.
+    room: Mutex<Option<Room>>,
+}
+
+impl fmt::Debug for Writable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Writable").finish_non_exhaustive()
+    }
+}
 
 impl UdpPoller for Writable {
-    fn poll_writable(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let room = this
+            .room
+            .get_mut()
+            .map_err(|_| io::Error::other("QUIC poller lock poisoned"))?;
+        let wait = room.get_or_insert_with(|| {
+            let inject = this.inject.clone();
+            // The permit is released at once: it only signals that a slot is free.
+            Box::pin(async move { inject.reserve_owned().await.map(drop) })
+        });
+        let ready = wait.as_mut().poll(cx);
+        if ready.is_ready() {
+            *room = None;
+        }
+        ready.map(|result| result.map_err(|_| io::ErrorKind::BrokenPipe.into()))
     }
 }
