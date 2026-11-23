@@ -1,7 +1,7 @@
 [package]
 name = "wirust"
 description = "Single-binary HTTPS debugging proxy with a web UI: decrypts TLS with a local CA, shows each client's TLS fingerprint (JA4, JA3)"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

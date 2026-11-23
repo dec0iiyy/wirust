@@ -32,7 +32,7 @@ and find out which TLS stack each client really uses.
 - **AI agents can read it.** `wirust mcp` lets Claude Code, Cursor and others list and search
   captured traffic, with secrets redacted.
 
-Status: 0.4.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
+Status: 0.5.0. Tried on an Android emulator, not on real phones yet; see [Status](#status).
 
 ## Install
 
@@ -155,7 +155,8 @@ Not in wirust yet: a native app, HTTP/3. See [docs/roadmap.md](docs/roadmap.md).
   printed link, accept only their own `Host` and `Origin` (no DNS rebinding, no cross-site
   requests), and the proxy refuses to forward to them.
 - `wirust connect` listens on the LAN only while it runs and lets a device in only after you
-  approve its IP address.
+  approve its IP address. A device that uses the proxy over the network cannot reach services
+  on this computer's own loopback address through it (a `map_remote` rule you wrote can).
 - The CA key (`ca-key.pem`, mode 0600 on Unix) can sign a certificate for any site. Keep the
   config directory private and remove the CA from your trust stores when you stop using wirust.
 - Flows in memory, session files (mode 0600) and HAR exports contain the traffic's passwords,
@@ -173,8 +174,13 @@ the MCP server, phones, WireGuard capture, architecture, design, roadmap and rel
 
 ## Status
 
-Version 0.4.0. 321 automated tests (unit and integration, offline, on loopback) run in CI on
+Version 0.5.0. 391 automated tests (unit and integration, offline, on loopback) run in CI on
 Linux, macOS and Windows, plus a build check against Rust 1.88.
+
+Measured on loopback on a laptop (debug numbers will differ): about 50,000 HTTPS requests per
+second through the proxy at 16 connections, 1 GiB bodies stream at roughly 500 MB/s without
+being buffered, memory is bounded by `--max-memory` (512 MiB by default), and an idle proxy
+uses no CPU.
 
 Checked by hand:
 - curl through the proxy.
