@@ -1,5 +1,6 @@
 //! The listener, CONNECT tunnels, TLS interception and request forwarding.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -52,6 +53,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Limit on the TLS handshake with the client.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Pause after a failed accept, so running out of file descriptors does not spin.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// Whether the proxy may listen on an address other hosts can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -337,24 +341,38 @@ impl Proxy {
         self.state.certs.ca()
     }
 
-    /// Accepts and serves clients until the listener fails.
+    /// Accepts and serves clients. A failed accept (out of file descriptors, a client that
+    /// reset before it was accepted) is reported once on stderr and retried after a pause.
     ///
     /// # Errors
     ///
-    /// Fails when accepting fails.
+    /// Never returns: the result type is kept for callers that `?` it.
     pub async fn run(self) -> anyhow::Result<()> {
+        let mut failing = None;
         loop {
-            let (stream, peer) = self.listener.accept().await?;
-            let _ = stream.set_nodelay(true);
-            tokio::spawn(serve_client(Arc::clone(&self.state), stream, peer));
+            match self.listener.accept().await {
+                Ok((stream, peer)) => {
+                    failing = None;
+                    let _ = stream.set_nodelay(true);
+                    tokio::spawn(serve_client(Arc::clone(&self.state), stream, peer));
+                }
+                Err(e) => {
+                    if failing != Some(e.kind()) {
+                        eprintln!("{}: accepting a client: {e}; retrying", crate::NAME);
+                        failing = Some(e.kind());
+                    }
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                }
+            }
         }
     }
 }
 
 /// Serves the plain HTTP/1.1 connection from the client: CONNECT and absolute-form requests.
 async fn serve_client(state: Arc<State>, stream: TcpStream, peer: SocketAddr) {
+    let pools: Arc<Pools> = Arc::default();
     let service = service_fn(move |request: Request<Incoming>| {
-        let state = Arc::clone(&state);
+        let (state, pools) = (Arc::clone(&state), Arc::clone(&pools));
         async move {
             // An unpaired client gets no answer: the error makes hyper close the connection.
             if let Some(pairing) = &state.pairing
@@ -362,7 +380,7 @@ async fn serve_client(state: Arc<State>, stream: TcpStream, peer: SocketAddr) {
             {
                 return Err(NotPaired);
             }
-            Ok(proxy_request(state, peer, request).await)
+            Ok(proxy_request(state, peer, request, &pools).await)
         }
     });
     // A client that disconnects mid-request is normal for a proxy; there is no one to tell.
@@ -389,6 +407,7 @@ async fn proxy_request(
     state: Arc<State>,
     peer: SocketAddr,
     request: Request<Incoming>,
+    pools: &Pools,
 ) -> Response<ProxyBody> {
     if request.method() == Method::CONNECT {
         let Some(authority) = request.uri().authority().cloned() else {
@@ -437,7 +456,15 @@ async fn proxy_request(
         offer_h2: false,
         tls: None,
     };
-    forward(&state, peer, &target, None, request).await
+    let pool = {
+        let mut pools = pools.lock().expect("pool lock poisoned");
+        let key = (target.host.clone(), target.port);
+        if pools.len() >= MAX_POOLED_SERVERS && !pools.contains_key(&key) {
+            pools.clear();
+        }
+        Arc::clone(pools.entry(key).or_default())
+    };
+    forward(&state, peer, &target, Some(&pool), request).await
 }
 
 /// Handles the bytes of a CONNECT tunnel: TLS is intercepted, anything else passed through.
@@ -736,6 +763,13 @@ impl Target {
 
 /// The server connection of one tunnel, opened by its first request.
 type Pool = tokio::sync::Mutex<Option<Sender>>;
+
+/// The server connections of one plain client connection by `host:port`, so absolute-form
+/// requests reuse a connection like requests in a tunnel do.
+type Pools = Mutex<HashMap<(String, u16), Arc<Pool>>>;
+
+/// Servers one plain client connection keeps connections to; a new one past this empties it.
+const MAX_POOLED_SERVERS: usize = 8;
 
 /// Forwards one request, logging it when the response body ends.
 ///
