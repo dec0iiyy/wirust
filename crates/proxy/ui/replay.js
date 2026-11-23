@@ -74,7 +74,8 @@ document.addEventListener("DOMContentLoaded", () => {
   replayButton.title = "Send the selected request again as it was";
   const editButton = button("Edit & replay", null, () => {
     const m = current();
-    if (m) openEditor(m.raw);
+    // The list holds summaries; the editor needs the whole record (headers, body).
+    if (m) fullFlow(m.id).then(openEditor, (e) => toast(e.message));
   });
   editButton.title = "Change method, URL, headers or body, then send";
   const composeButton = button("New request", null, () => openEditor(null));
@@ -288,7 +289,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const wanted = Number(fragment.get("flow"));
     const open = (tries) => {
       const m = flows.get(wanted);
-      if (m && m.kind === "exchange" && m.state === "done") openEditor(m.raw);
+      if (m && m.kind === "exchange" && m.state === "done") fullFlow(wanted).then(openEditor, (e) => toast(e.message));
       else if (tries > 0) setTimeout(() => open(tries - 1), 200);
     };
     open(50);

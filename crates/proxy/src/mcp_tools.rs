@@ -498,8 +498,9 @@ fn api_error(reply: &crate::mcp::ApiReply) -> String {
     format!("the control plane answered {}", reply.error_text())
 }
 
+/// The newest `limit` flows matching `query`, as redacted summaries (no headers or bodies).
 async fn flows(server: &Server, query: Option<&str>, limit: u64) -> Result<Vec<Value>, String> {
-    let mut path = format!("/api/v1/flows?limit={limit}");
+    let mut path = format!("/api/v1/flows?view=summary&limit={limit}");
     if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
         let _ = write!(path, "&q={}", escape(query));
     }
@@ -594,26 +595,43 @@ async fn list_flows(server: &Server, args: &Map<String, Value>) -> ToolResult {
     })))
 }
 
+/// The first 160 characters of a text response body of the flow `summary` stands for, read
+/// from its full (redacted) record one flow at a time; `None` for binary or missing bodies.
+async fn body_start(server: &Server, summary: &Value) -> Option<String> {
+    let body = &summary["response_body"];
+    if body["encoding"] != "utf8" {
+        return None;
+    }
+    if body["size"].as_u64() == Some(0) {
+        return Some(String::new());
+    }
+    let full = flow(server, summary["id"].as_u64()?).await.ok()?;
+    let body = &full["flow"]["response_body"];
+    let text = body["data"]
+        .as_str()
+        .filter(|_| body["encoding"] == "utf8")?;
+    Some(text.chars().take(160).collect())
+}
+
 async fn search_flows(server: &Server, args: &Map<String, Value>) -> ToolResult {
     let query = text(args, "query")?.ok_or("query is required")?;
     let limit = uint(args, "limit")?.unwrap_or(20).clamp(1, MAX_ROWS);
     let found = flows(server, Some(query), limit).await?;
-    let hits: Vec<Value> = found
-        .iter()
-        .map(|stored| {
-            let f = &stored["flow"];
-            let target = f["url"].as_str().or(f["target"].as_str()).unwrap_or("");
-            let head = format!(
-                "{} {} -> {}",
-                f["method"].as_str().or(f["type"].as_str()).unwrap_or("?"),
-                target,
-                f["status"].as_u64().map_or_else(|| "-".to_owned(), |s| s.to_string()),
-            );
-            let body = f["response_body"]["data"].as_str().filter(|_| f["response_body"]["encoding"] == "utf8");
-            let preview: Option<String> = body.map(|b| b.chars().take(160).collect());
-            json!({ "id": f["id"], "snippet": head.chars().take(ROW_URL_CHARS).collect::<String>(), "body_start": preview })
-        })
-        .collect();
+    let mut hits = Vec::with_capacity(found.len());
+    for stored in &found {
+        let f = &stored["flow"];
+        let target = f["url"].as_str().or(f["target"].as_str()).unwrap_or("");
+        let head = format!(
+            "{} {} -> {}",
+            f["method"].as_str().or(f["type"].as_str()).unwrap_or("?"),
+            target,
+            f["status"]
+                .as_u64()
+                .map_or_else(|| "-".to_owned(), |s| s.to_string()),
+        );
+        let preview = body_start(server, f).await;
+        hits.push(json!({ "id": f["id"], "snippet": head.chars().take(ROW_URL_CHARS).collect::<String>(), "body_start": preview }));
+    }
     Ok(Output::Captured(
         json!({ "count": hits.len(), "hits": hits }),
     ))

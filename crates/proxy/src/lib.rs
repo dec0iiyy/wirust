@@ -49,6 +49,7 @@ pub mod schema;
 pub mod script;
 mod script_api;
 pub mod session;
+pub mod summary;
 pub mod sysproxy;
 pub mod throttle;
 pub mod trust;

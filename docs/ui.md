@@ -222,13 +222,33 @@ so narrow windows can hide the label.
 3. Every request sends `Authorization: Bearer TOKEN`. Live updates read
    `GET /api/v1/events` with `fetch` and a stream parser, because `EventSource` cannot send
    headers. On connect the page subscribes first, then loads `GET /api/v1/flows`
-   (on reconnect only `?after=` the oldest pending flow) and merges by id.
+   (on reconnect only `?after=` the oldest pending flow) and merges by id. The list and the
+   stream are read with `?view=summary` (below), so the page never holds every body: the
+   selected flow's whole record comes from `GET /api/v1/flows/{id}` when it is selected and
+   again when its state changes, and goes back to a summary when another flow is selected.
+   Plain words in the search box match the URL, host and error text of every row, and the
+   headers of the selected one; the query language runs on the server over whole flows.
 4. A `401` drops the stored token and says so; the proxy makes a new token at each start.
 
 The fragment may also carry `flow=ID`, `tab=overview|tls|request|response`, `q=FILTER` and
 `panel=pauses|rules|connect|help` to open a flow, a tab, a filter or a panel:
 `/#token=...&flow=12&tab=tls&panel=rules`. `panel=compose` opens **New request** and
 `panel=edit-replay` (with `flow=ID`) opens **Edit & replay** for that flow.
+
+### Summary view
+
+`GET /api/v1/flows?view=summary` (with any of `host`, `method`, `status`, `limit`, `after`,
+`q`) and `GET /api/v1/events?view=summary` answer flows in summary form: every field the list
+shows, with the names and order of the whole record, plus `"summary": true`. An exchange
+summary drops `request_headers`, `response_headers` and `response_trailers`, keeps
+`request_body` and `response_body` as `{"size", "truncated", "encoding", "content_encoding"?}`
+without `data`, and adds `response_content_type` (the response's `Content-Type`, for the Type
+column) when there is one. A pending flow drops `request_headers`. Failed handshakes and
+tunnels hold no headers or bodies, so their summary is the whole record plus the marker. On
+the stream, `started`, `completed`, `failed` and `tls_failed` carry summaries; pause and `ws`
+events are unchanged. `?q=` still searches whole flows on the server. Without `view` (or
+with `view=full`) both answers are as before; any other value is a `400`. The whole record
+stays at `GET /api/v1/flows/{id}`.
 
 `GET /api/v1/info` (same token, `Host` and `Origin` checks) answers
 `{"name", "version", "proxy_addr", "magic_host", "ca_fingerprint_sha256", "rules_file",

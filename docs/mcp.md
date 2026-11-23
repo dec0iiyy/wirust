@@ -79,9 +79,9 @@ Read-only, always offered:
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `list_flows` | `query?`, `limit?` (1 to 200, default 50), `offset?` | compact rows, newest first: id, state, type, method, URL (300 characters at most), status, `ms`, `response_bytes`, `tls_client`, error, flags; `more` when older rows exist |
+| `list_flows` | `query?`, `limit?` (1 to 200, default 50), `offset?` | compact rows from `GET /api/v1/flows?view=summary` (no bodies cross the API), newest first: id, state, type, method, URL (300 characters at most), status, `ms`, `response_bytes`, `tls_client`, error, flags; `more` when older rows exist |
 | `get_flow` | `id`, `parts?` (`request`, `response`, `bodies`, `tls`, `timing`; default request, response, timing), `max_body_bytes?` (default 8192, at most 65536) | the head and the parts asked for. Text bodies are shown decoded and cut at `max_body_bytes` with `truncated`. A binary body is shown as `binary body, N bytes, not shown while redaction is on`; only with `--no-redact` as `hex_preview` (64 bytes) and `base64_preview`. `captured_truncated` says the proxy itself kept only part of the body (`--body-limit`) |
-| `search_flows` | `query`, `limit?` (default 20) | ids with a one-line snippet (`METHOD URL -> STATUS`) and the first 160 characters of a text response body |
+| `search_flows` | `query`, `limit?` (default 20) | ids with a one-line snippet (`METHOD URL -> STATUS`) and the first 160 characters of a text response body (read one flow at a time from `GET /api/v1/flows/{id}`) |
 | `get_tls_client` | `id` | JA4, JA3 hash, SNI, ALPN, TLS version and the known client name; for a failed handshake the JA4 and the reason |
 | `get_websocket_messages` | `id`, `after?`, `limit?` (default 50) | the messages of `GET /api/v1/flows/{id}/messages` |
 | `get_grpc` | `id` | the decoded gRPC call of `GET /api/v1/flows/{id}/grpc` |

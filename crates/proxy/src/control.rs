@@ -34,6 +34,7 @@ use crate::intercept::{Pauses, Resolution};
 use crate::proxy::{Proxy, RemoteAccess, check_listen};
 use crate::rules::{Rules, file_name};
 use crate::rules_api;
+use crate::summary::View;
 
 /// The cookie the UI page may set after reading the token from the URL fragment.
 pub const TOKEN_COOKIE: &str = "token";
@@ -401,24 +402,20 @@ fn route(state: &State, request: &Request<Bytes>) -> Response<ControlBody> {
     }
     let method = request.method();
     match (method, segments.as_slice()) {
-        (&Method::GET, ["flows"]) => {
-            let filter = match filter(request.uri().query().unwrap_or_default()) {
-                Ok(filter) => filter,
-                Err(e) => return error(StatusCode::BAD_REQUEST, &e),
-            };
-            let after = query_value(request.uri().query().unwrap_or_default(), "after")
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-            json(
-                StatusCode::OK,
-                &state.store.list(after.saturating_add(1).., &filter),
-            )
-        }
+        (&Method::GET, ["flows"]) => list_flows(state, request.uri().query().unwrap_or_default()),
         (&Method::GET, ["flows", id]) => match id.parse().ok().and_then(|id| state.store.get(id)) {
             Some(flow) => json(StatusCode::OK, &flow),
             None => error(StatusCode::NOT_FOUND, "no such flow"),
         },
-        (&Method::GET, ["events"]) => events(state.bus.subscribe()),
+        (&Method::GET, ["events"]) => {
+            match View::parse(query_value(
+                request.uri().query().unwrap_or_default(),
+                "view",
+            )) {
+                Ok(view) => events(state.bus.subscribe(), view),
+                Err(e) => error(StatusCode::BAD_REQUEST, &e),
+            }
+        }
         (&Method::GET, ["pauses"]) => json(StatusCode::OK, &state.pauses.list()),
         (&Method::GET, ["info"]) => json(StatusCode::OK, &state.info()),
         (&Method::POST, ["pauses", id, verb @ ("resume" | "abort")]) => {
@@ -449,6 +446,23 @@ fn route(state: &State, request: &Request<Bytes>) -> Response<ControlBody> {
             | ["pauses", _, "resume" | "abort"],
         ) => error(StatusCode::METHOD_NOT_ALLOWED, "wrong method"),
         _ => error(StatusCode::NOT_FOUND, "no such endpoint"),
+    }
+}
+
+/// `GET /api/v1/flows`: the filtered flows after `after`, whole or as summaries (`view`).
+fn list_flows(state: &State, query: &str) -> Response<ControlBody> {
+    let (filter, view) =
+        match filter(query).and_then(|f| Ok((f, View::parse(query_value(query, "view"))?))) {
+            Ok(parsed) => parsed,
+            Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+        };
+    let after = query_value(query, "after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let flows = state.store.list(after.saturating_add(1).., &filter);
+    match crate::summary::list_json(&flows, view) {
+        Ok(body) => json_bytes(StatusCode::OK, body),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
@@ -570,14 +584,18 @@ fn asset(method: &Method, path: &str) -> Response<ControlBody> {
     response
 }
 
-/// Server-Sent Events: one `data:` line of JSON per [`FlowEvent`](crate::events::FlowEvent).
-fn events(mut bus: broadcast::Receiver<crate::events::FlowEvent>) -> Response<ControlBody> {
+/// Server-Sent Events: one `data:` line of JSON per [`FlowEvent`](crate::events::FlowEvent),
+/// whole or in summary form (`view`).
+fn events(
+    mut bus: broadcast::Receiver<crate::events::FlowEvent>,
+    view: View,
+) -> Response<ControlBody> {
     let (sender, receiver) = mpsc::channel::<Bytes>(64);
     tokio::spawn(async move {
         loop {
             let chunk = tokio::select! {
                 event = bus.recv() => match event {
-                    Ok(event) => match serde_json::to_string(&event) {
+                    Ok(event) => match crate::summary::event_json(&event, view) {
                         Ok(json) => format!("data: {json}\n\n"),
                         Err(_) => continue,
                     },
@@ -627,16 +645,19 @@ fn bytes(status: StatusCode, data: Bytes) -> Response<ControlBody> {
 
 fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<ControlBody> {
     match serde_json::to_vec(value) {
-        Ok(body) => {
-            let mut response = bytes(status, Bytes::from(body));
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            );
-            response
-        }
+        Ok(body) => json_bytes(status, body),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
+}
+
+/// An `application/json` answer of already serialised `body`.
+fn json_bytes(status: StatusCode, body: Vec<u8>) -> Response<ControlBody> {
+    let mut response = bytes(status, Bytes::from(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 #[derive(Serialize)]

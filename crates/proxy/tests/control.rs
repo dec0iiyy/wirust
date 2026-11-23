@@ -350,3 +350,114 @@ async fn events_stream_as_server_sent_events() -> TestResult {
     assert!(seen.starts_with("data: "));
     Ok(())
 }
+
+/// Opens `GET path` as an SSE stream on the control plane.
+async fn sse(ui: &Ui, path: &str) -> anyhow::Result<hyper::body::Incoming> {
+    let tcp = TcpStream::connect(ui.addr).await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(connection);
+    let request = Request::get(path)
+        .header("host", ui.addr.to_string())
+        .header("authorization", format!("Bearer {}", ui.token))
+        .body(Full::new(Bytes::new()))?;
+    let response = sender.send_request(request).await?;
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    Ok(response.into_body())
+}
+
+/// Reads `body` until a `completed` event arrives; returns that event's JSON.
+async fn completed_event(body: &mut hyper::body::Incoming) -> anyhow::Result<serde_json::Value> {
+    let mut seen = String::new();
+    loop {
+        if let Some(line) = seen
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find(|line| line.contains("\"event\":\"completed\""))
+        {
+            return Ok(serde_json::from_str(line)?);
+        }
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("stream ended: {seen}"))??;
+        if let Some(data) = frame.data_ref() {
+            seen.push_str(&String::from_utf8_lossy(data));
+        }
+    }
+}
+
+/// Asserts that `flow` is a summary: marked, no header lists, no body data, no trailers.
+fn assert_summary(flow: &serde_json::Value) {
+    assert_eq!(flow["summary"], true, "{flow}");
+    for absent in ["request_headers", "response_headers", "response_trailers"] {
+        assert!(flow.get(absent).is_none(), "{absent} in {flow}");
+    }
+    assert!(flow["request_body"].get("data").is_none(), "{flow}");
+    assert!(flow["response_body"].get("data").is_none(), "{flow}");
+}
+
+#[tokio::test]
+async fn the_summary_view_drops_headers_and_bodies_and_the_default_stays_whole() -> TestResult {
+    let ui = start_ui(false).await?;
+    let port = http_server().await?;
+    let mut summary_stream = sse(&ui, "/api/v1/events?view=summary").await?;
+    let mut full_stream = sse(&ui, "/api/v1/events").await?;
+    let url = format!("http://127.0.0.1:{port}/summary-test");
+    call(
+        ui.proxy.addr,
+        Method::GET,
+        &url,
+        &[("host", format!("127.0.0.1:{port}"))],
+    )
+    .await?;
+    let summary_event = completed_event(&mut summary_stream).await?;
+    let full_event = completed_event(&mut full_stream).await?;
+    assert_summary(&summary_event["flow"]);
+    assert!(full_event["flow"].get("summary").is_none());
+    assert_eq!(
+        full_event["flow"]["response_body"]["data"],
+        "hello from /summary-test"
+    );
+    assert!(full_event["flow"]["request_headers"].is_array());
+
+    let (status, _, body) = ui.get("/api/v1/flows?view=summary").await?;
+    assert_eq!(status, StatusCode::OK);
+    let summaries: serde_json::Value = serde_json::from_slice(&body)?;
+    let (_, _, body) = ui.get("/api/v1/flows").await?;
+    let full: serde_json::Value = serde_json::from_slice(&body)?;
+    let (summary, whole) = (&summaries[0]["flow"], &full[0]["flow"]);
+    assert_eq!(summaries[0]["state"], "done");
+    assert_summary(summary);
+    assert!(whole.get("summary").is_none() && whole["response_headers"].is_array());
+    assert_eq!(whole["response_body"]["data"], "hello from /summary-test");
+    let size = whole["response_body"]["size"].as_u64();
+    assert_eq!(size, Some("hello from /summary-test".len() as u64));
+    assert_eq!(summary["response_body"]["size"].as_u64(), size);
+    for same in [
+        "id",
+        "url",
+        "method",
+        "status",
+        "client_version",
+        "timing",
+        "type",
+        "schema_version",
+    ] {
+        assert_eq!(summary[same], whole[same], "{same}");
+    }
+    let id = whole["id"].as_u64().unwrap_or_default();
+    let (_, _, body) = ui.get(&format!("/api/v1/flows/{id}")).await?;
+    let one: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(one["flow"], *whole, "the full record is unchanged");
+
+    let (_, _, body) = ui
+        .get("/api/v1/flows?view=summary&q=path%3A%2Fsummary-test")
+        .await?;
+    let found: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(found.as_array().map(Vec::len), Some(1));
+    assert_summary(&found[0]["flow"]);
+    for bad in ["/api/v1/flows?view=bodies", "/api/v1/events?view=x"] {
+        let (status, ..) = ui.get(bad).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    Ok(())
+}

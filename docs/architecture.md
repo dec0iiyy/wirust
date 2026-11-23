@@ -34,6 +34,7 @@ built in parallel without editing the same functions.
 | `passthrough.rs` | `--passthrough`/`--decrypt-only` patterns, the live `Passthrough` lists, the undecrypted relay; `docs/passthrough.md` |
 | `throttle.rs` | `Throttled`, the bandwidth-capped streaming body |
 | `har.rs`, `har_api.rs`, `session.rs` | HAR 1.2 export and import, the `/api/v1/har` route, session files (`--session`, `export`, `import`, `view`); `docs/interchange.md` |
+| `summary.rs` | the summary form of flows and flow events (`?view=summary`): no header lists, bodies or trailers |
 | `query.rs`, `curl.rs`, `codegen.rs` | the search query language (`?q=`, `--filter`), the cURL export (`/api/v1/flows/{id}/curl`) and the code export in six languages (`/api/v1/flows/{id}/code`) |
 | `ws.rs`, `ws_api.rs` | WebSocket capture: frame parser, the pump `join_upgrades` runs for `Upgrade: websocket`, `WsStore` (inside `FlowStore`), `FlowEvent::WsMessage`, `permessage-deflate` inflation of the recorded copy, `GET` and `POST /api/v1/flows/{id}/messages` (`ws::Live` holds the open connections that accept injected messages); `docs/websocket.md` |
 | `grpc.rs`, `protobuf.rs`, `schema.rs`, `grpc_api.rs` | gRPC, gRPC-Web and protobuf decoding of recorded bodies: framing, inflating, status from `response_trailers`, the schema-less decoder, `.proto` schemas compiled with `protox` and decoded with `prost-reflect`, `GET /api/v1/flows/{id}/grpc` and `GET /api/v1/proto`; `docs/grpc.md` |
@@ -82,7 +83,11 @@ forwarded either way are the wire bytes.
 `events::Flow` = `{ "schema_version": 1, "type": "exchange" | "tls_failure" | "tunnel", ...the
 record's fields }`. The JSON Lines log (`--json`), `GET /api/v1/flows/{id}` (inside
 `{"state": "done", "flow": ...}`) and the SSE stream (`{"event": "completed", "flow": ...}`)
-all serialise this one type. Rules: adding an optional field keeps the version; renaming,
+all serialise this one type. `summary.rs` borrows it into the summary form
+(`?view=summary` on `GET /api/v1/flows` and `/events`, `docs/ui.md`): the same fields in the
+same order minus header lists, body data and trailers, plus `"summary": true`; the web UI
+and the MCP list tools read that, and only `GET /api/v1/flows/{id}` sends whole records to
+them. Rules: adding an optional field keeps the version; renaming,
 removing or changing the meaning of a field raises `SCHEMA_VERSION`. `flags` is omitted when
 empty, so ordinary traffic logs exactly the fields it did before.
 
@@ -100,8 +105,9 @@ empty, so ordinary traffic logs exactly the fields it did before.
 ## Where features plug in
 
 - **Web UI**: files in `crates/proxy/ui/`, listed in `control::ASSETS`. Data from
-  `GET /api/v1/flows?host=&method=&status=&limit=&after=&q=`, `GET /api/v1/flows/{id}`, live
-  updates from `GET /api/v1/events` (SSE; the UI must use `fetch` with the Bearer header, since
+  `GET /api/v1/flows?host=&method=&status=&limit=&after=&q=&view=summary`,
+  `GET /api/v1/flows/{id}` for the selected flow, live updates from
+  `GET /api/v1/events?view=summary` (SSE; the UI must use `fetch` with the Bearer header, since
   `EventSource` cannot send headers, or set the `token` cookie). Keep the CSP: no inline
   scripts or styles.
 - **New API routes**: put them in the feature's own `*_api.rs` and call it from

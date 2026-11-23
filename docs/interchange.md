@@ -109,6 +109,8 @@ anything that is not JSON shaped like a HAR document is an error naming line and
 ## The query language
 
 One language for `GET /api/v1/flows?q=`, `GET /api/v1/har?q=`, `--filter`, and the UI.
+A search always runs over whole flows; `GET /api/v1/flows?q=...&view=summary` only answers
+the matches in summary form (no headers or bodies, `docs/ui.md`, "Summary view").
 
 ```text
 query   := or
