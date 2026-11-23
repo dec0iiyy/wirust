@@ -5,8 +5,8 @@ Not built yet, in rough priority order. Everything else described in `docs/` is 
 1. HTTP/3 interception: QUIC is UDP and cannot go through an HTTP CONNECT tunnel, so clients
    fall back to h2 or HTTP/1.1. It needs a transparent mode (a WireGuard-style entry point)
    or MASQUE (`CONNECT-UDP`). The same mode would catch apps that ignore the system proxy.
-   An experimental WireGuard capture mode behind the cargo feature `wireguard` (not in release
-   binaries) terminates TCP and QUIC (`docs/wireguard.md`): HTTP/3 requests from clients that
+   An experimental WireGuard capture mode (in release binaries since 0.6.0; it starts only
+   with `wirust wireguard`) terminates TCP and QUIC (`docs/wireguard.md`): HTTP/3 requests from clients that
    accept the wirust CA for QUIC become flows (tested in process only). Not built yet: HTTP/3
    to the server (the server leg is HTTP/2 or HTTP/1.1), JA4 for QUIC clients, and a test
    with real browsers and phones.

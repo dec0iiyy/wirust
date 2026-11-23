@@ -236,7 +236,7 @@ envelope:
 ## Not supported
 
 - HTTP/3 (QUIC) traffic is not intercepted through the HTTP proxy. Only the experimental
-  WireGuard capture mode (cargo feature `wireguard`, not in release binaries) terminates it;
+  WireGuard capture mode (`wirust wireguard`) terminates it;
   there its requests run through rules like any other (`docs/wireguard.md`).
 - WebSocket messages: they are recorded (`docs/websocket.md`), but rules and breakpoints
   apply only to the upgrade request, never to messages.

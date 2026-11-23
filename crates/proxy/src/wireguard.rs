@@ -1,6 +1,7 @@
-//! Experimental WireGuard capture mode (cargo feature `wireguard`): the official WireGuard
-//! app on a phone sends all of its traffic here, and every TCP connection becomes a flow as
-//! if the app had sent CONNECT to the original destination. No TUN device, no root.
+//! Experimental WireGuard capture mode (cargo feature `wireguard`, on by default; it starts
+//! only with `wirust wireguard`): the official WireGuard app on a phone sends all of its
+//! traffic here, and every TCP connection becomes a flow as if the app had sent CONNECT to
+//! the original destination; QUIC to port 443 is served as HTTP/3. No TUN device, no root.
 //!
 //! [`Store`] keeps the keys and peers, [`Server`] listens; `docs/wireguard.md` describes
 //! what happens to each kind of packet and what is out of scope.

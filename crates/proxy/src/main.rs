@@ -321,8 +321,8 @@ Commands:
                         as an ordinary client, and print the status line; see docs/replay.md
   mcp                   a Model Context Protocol server on stdio that lets AI agents inspect
                         the flows of a running `{NAME} --ui`; see docs/mcp.md
-  wireguard            experimental, only in builds with the cargo feature `wireguard`:
-                        capture a phone's TCP traffic through the official WireGuard app
+  wireguard             experimental: capture a phone's TCP and HTTP/3 traffic through the
+                        official WireGuard app
                         (docs/wireguard.md); `add-peer` prints a client config and QR code
 
 Options:
@@ -686,11 +686,12 @@ Usage:
   {NAME} wireguard [--listen UDP_ADDR] [--allow-remote] [run options]
   {NAME} wireguard add-peer NAME [--lan-ip IP] [--port P] [--config-dir DIR]
 
-Only in builds with the cargo feature `wireguard`; release builds do not have it.
+Experimental: tested only in-process on loopback, not with a real phone yet.
 Listens for WireGuard on UDP_ADDR and turns every TCP connection of the configured
-peers into flows, as if the phone had sent CONNECT. DNS is relayed to this computer's
-resolver; QUIC (UDP/443) and other UDP are dropped, so apps fall back to TCP. The HTTP
-proxy listener moves to a free loopback port. Peers are read at start. See
+peers into flows, as if the phone had sent CONNECT. QUIC to UDP/443 is terminated and
+served as HTTP/3 to clients that accept the wirust CA for QUIC; the server leg is
+HTTP/2 or HTTP/1.1. DNS is relayed to this computer's resolver; other UDP is dropped.
+The HTTP proxy listener moves to a free loopback port. Peers are read at start. See
 docs/wireguard.md.
 
 Options:
@@ -973,7 +974,8 @@ fn parse(args: &[String]) -> anyhow::Result<Command> {
         ["wireguard", ..] => {
             let _ = listen_given;
             bail!(
-                "this build has no WireGuard capture mode; it needs the cargo feature `wireguard`"
+                "this build has no WireGuard capture mode: it was built without the default \
+                 cargo feature `wireguard`"
             )
         }
         _ => bail!("unknown command {}; see --help", words.join(" ")),

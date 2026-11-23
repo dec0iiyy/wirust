@@ -1,8 +1,11 @@
 # WireGuard capture mode (experimental)
 
-> **Experimental.** Built only with the cargo feature `wireguard`, which is off by default:
-> release binaries do not contain it. It was written as a spike, tested on loopback with an
-> in-process WireGuard client, and has not been tried with a real phone yet.
+> **Experimental.** Included in release binaries since 0.6.0 (the cargo feature `wireguard`
+> is on by default; `--no-default-features` builds without it), but it starts only with
+> `wirust wireguard`. It was written as a spike, tested on loopback with an in-process
+> WireGuard client, and has not been tried with a real phone or browser yet. HTTP/3 is
+> terminated only on the client leg (the server leg is HTTP/2 or HTTP/1.1), QUIC clients
+> get no JA4, and HTTP/3 works only for clients that accept the wirust CA for QUIC.
 
 Through an HTTP proxy, wirust sees only the traffic that honours the proxy setting. Apps that
 ignore the system proxy (Flutter's `dart:io`, raw sockets) and HTTP/3 (QUIC, UDP) go around
@@ -14,7 +17,7 @@ or firewall change, no root.
 ## Use
 
 ```sh
-cargo build --release --features wireguard
+cargo build --release      # or a release binary: the mode is in it since 0.6.0
 
 # 1. A peer: prints the app configuration as text and as a QR code.
 wirust wireguard add-peer phone                     # --lan-ip IP and --port P override the endpoint
@@ -176,7 +179,7 @@ A WireGuard listener is a network service. What guards it:
 
 ## Tests
 
-`cargo test --features wireguard --test wireguard` runs a boringtun client and a smoltcp
+`cargo test --test wireguard` runs a boringtun client and a smoltcp
 stack in the test process, over UDP on `127.0.0.1`: an HTTP request through the tunnel
 becomes a flow with the peer's tunnel address as its client, and a handshake from an unknown
 key gets no answer. A quinn and `h3` client in the same process sends HTTP/3 through the

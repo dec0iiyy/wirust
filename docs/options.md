@@ -63,7 +63,7 @@ preface must arrive within 10 s, and at most 10,000 client connections are serve
 | `view --session FILE` | print a session file, `--filter` narrows it |
 | `replay --session FILE --id N` | send a flow again through a running proxy (`--via`), optionally changed (`--set-header`, `--method`, `--url`); [replay.md](replay.md) |
 | `mcp` | a Model Context Protocol server on stdio so AI agents can inspect a running `wirust --ui`; options `--api`, `--token`, `--token-file`, `--allow-write`, `--no-redact`, `--max-output`; [mcp.md](mcp.md) |
-| `wireguard` | experimental, only in builds with the cargo feature `wireguard`: capture a phone's TCP traffic through the official WireGuard app; [wireguard.md](wireguard.md) |
+| `wireguard` | experimental: capture a phone's TCP and HTTP/3 traffic through the official WireGuard app; [wireguard.md](wireguard.md) |
 
 ## Terminal output
 

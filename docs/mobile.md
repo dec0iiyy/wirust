@@ -18,8 +18,8 @@ verified". Corrections welcome.
   and prints one hint per device.
 - HTTP/3 (QUIC) is UDP and cannot go through an HTTP proxy. An app that honours the proxy
   falls back to TCP. An app that ignores the proxy bypasses it completely; the proxy never
-  sees that traffic. The experimental WireGuard capture mode (`docs/wireguard.md`, not in
-  release binaries) also terminates HTTP/3 for clients that accept the wirust CA for QUIC;
+  sees that traffic. The experimental WireGuard capture mode (`wirust wireguard`,
+  `docs/wireguard.md`) also terminates HTTP/3 for clients that accept the wirust CA for QUIC;
   untested with real phones.
 - Apps that ignore the system proxy (Flutter's `dart:io` client, raw sockets) bypass it.
 
