@@ -1519,13 +1519,7 @@ fn run(
             proxy.ca().path().display()
         );
         if let Some(control) = &control {
-            // Written before the link is printed, so whoever waits for that line finds it.
-            if let Some(path) = &args.token_file {
-                write_private(path, &format!("{}\n", control.url()))
-                    .with_context(|| format!("writing --token-file {}", path.display()))?;
-            }
-            eprintln!("{NAME} UI (keep this link private): {}", control.url());
-            control.set_session_file(args.session.clone());
+            announce_ui(control, &args)?;
         }
         let local = proxy.local_addr()?;
         // Dropped on every way out of this block, so an early error also restores it.
@@ -1562,6 +1556,18 @@ fn run(
         }
         result
     })
+}
+
+/// Writes the `--token-file` and prints the UI link. The file comes first, so whoever waits
+/// for the printed line finds it.
+fn announce_ui(control: &ControlPlane, args: &RunArgs) -> anyhow::Result<()> {
+    if let Some(path) = &args.token_file {
+        write_private(path, &format!("{}\n", control.url()))
+            .with_context(|| format!("writing --token-file {}", path.display()))?;
+    }
+    eprintln!("{NAME} UI (keep this link private): {}", control.url());
+    control.set_session_file(args.session.clone());
+    Ok(())
 }
 
 /// Prints a warning for each option that makes the proxy reachable by others or stops it
