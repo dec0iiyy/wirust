@@ -433,34 +433,8 @@ async fn redaction_closes_the_known_leaks() -> TestResult {
     ids.push(send(&mut setup, "/echo", gzip_headers, gzipped).await?);
 
     let mut mcp = Mcp::start(&setup, &[])?;
-    let secrets = [
-        "LEAKFORM1",
-        "LEAKFORM2",
-        "LEAKJ1",
-        "LEAKJ2",
-        "LEAKJ3",
-        "LEAKJ4",
-        "LEAKJ5",
-        "LEAKJ6",
-        "LEAKJ7",
-        "LEAKQ8",
-        "LEAKJ9",
-        "LEAKH1",
-        "LEAKH2",
-        "LEAKH3",
-        "LEAKH4",
-        "LEAKC1",
-        "LEAKC2",
-        "LEAKR1",
-        "LEAKR2",
-        "LEAKU1",
-        "LEAKU2",
-        UNSIGNED_JWT,
-        "LEAKB1",
-        &binary_b64,
-        "LEAKG1",
-        &gzip_b64,
-    ];
+    // Every marker starts with LEAK, so no output may contain LEAK at all.
+    let secrets = ["LEAK", UNSIGNED_JWT, &binary_b64, &gzip_b64];
     for id in &ids {
         let views = every_view(&mut mcp, *id)?;
         assert_hidden(&views, &secrets);
