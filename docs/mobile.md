@@ -18,7 +18,8 @@ verified". Corrections welcome.
   and prints one hint per device.
 - HTTP/3 (QUIC) is UDP and cannot go through an HTTP proxy. An app that honours the proxy
   falls back to TCP. An app that ignores the proxy bypasses it completely; the proxy never
-  sees that traffic.
+  sees that traffic. The experimental WireGuard capture mode (`docs/wireguard.md`, not in
+  release binaries) terminates HTTP/3 too.
 - Apps that ignore the system proxy (Flutter's `dart:io` client, raw sockets) bypass it.
 
 ## Quick start: `wirust connect`
@@ -163,7 +164,7 @@ whether the manual trust step is still needed, is not verified. Otherwise open
 | Browser works, an Android app fails with `TLS-FAIL` | The app ignores user CAs | Use a debug build with `debug-overrides` |
 | Every HTTPS site fails on iOS | Full trust not enabled | Certificate Trust Settings |
 | One app fails, others work | Certificate pinning | By design; for your own app disable pins in debug |
-| Some requests never appear | HTTP/3 (QUIC) or an app that ignores the proxy | Not capturable by an HTTP proxy |
+| Some requests never appear | HTTP/3 (QUIC) or an app that ignores the proxy | Not capturable by an HTTP proxy; the experimental WireGuard mode (`docs/wireguard.md`) captures both |
 | Device has no internet after debugging | Stale `http_proxy` setting | `wirust android reset`, or set Wi-Fi proxy to None |
 
 ## Security model

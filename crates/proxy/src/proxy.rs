@@ -792,8 +792,8 @@ pub(crate) async fn serve_transparent<S>(
 }
 
 /// The server side of one HTTP/3 connection the WireGuard capture mode terminated: every
-/// request on it goes to `host:443` through [`forward`], over one pooled HTTP/2 or HTTP/1.1
-/// connection, like the requests of an intercepted TLS tunnel.
+/// request on it goes to `host:443` through [`forward`] over HTTP/2 or HTTP/1.1, reusing the
+/// server connection like the requests of an intercepted TLS tunnel.
 #[cfg(feature = "wireguard")]
 #[derive(Debug)]
 pub(crate) struct QuicClient {

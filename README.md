@@ -141,11 +141,12 @@ official pages do not say.
 | WebSocket | yes (HTTP/1.1) | yes | yes | yes |
 | Scripting | yes (Rhai, sandboxed) | JavaScript | | Python |
 | gRPC, protobuf views | yes (schema-less, or with `.proto` files) | yes (paid tiers) | protobuf viewer | yes |
-| HTTP/3 | no | | | yes |
+| HTTP/3 | experimental: client side only, in the WireGuard mode, not in release binaries | | | yes |
 | Sets the system proxy | yes (macOS, tried by hand; Windows and GNOME not yet tried on a real system) | | | |
 | Client JA4, JA3 | yes | | | |
 
-Not in wirust yet: a native app, HTTP/3. See [docs/roadmap.md](docs/roadmap.md).
+Not in wirust yet: a native app, HTTP/3 outside the experimental WireGuard mode. See
+[docs/roadmap.md](docs/roadmap.md).
 
 ## Security
 
