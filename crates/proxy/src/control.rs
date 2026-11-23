@@ -121,7 +121,7 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     ),
 ];
 
-type ControlBody = UnsyncBoxBody<Bytes, Infallible>;
+pub(crate) type ControlBody = UnsyncBoxBody<Bytes, Infallible>;
 
 /// A bound control plane, ready to [`run`](Self::run).
 #[derive(Debug)]
@@ -343,6 +343,9 @@ fn module_routes(
         crate::ws_api::route(&state.store, method, segments, query, request.body())
     {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
+    }
+    if let Some(response) = crate::har_api::har_route(&state.store, method, segments, query) {
+        return Some(response);
     }
     if let Some(response) = crate::har_api::route(&state.store, method, segments, query) {
         return Some(response.map(|body| Full::new(body).boxed_unsync()));
@@ -618,8 +621,8 @@ fn events(
 }
 
 /// A streaming body fed by a channel; it ends when the sender is dropped.
-struct ChannelBody {
-    receiver: mpsc::Receiver<Bytes>,
+pub(crate) struct ChannelBody {
+    pub(crate) receiver: mpsc::Receiver<Bytes>,
 }
 
 impl Body for ChannelBody {

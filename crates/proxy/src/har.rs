@@ -8,6 +8,8 @@
 //! [`from_har`] reads a HAR file back into flow records, best effort, marking each with
 //! [`Flag::Imported`].
 
+use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -454,30 +456,98 @@ pub fn to_har<'f>(flows: impl IntoIterator<Item = &'f Flow>) -> Har {
 pub fn to_har_with_ws<'f>(flows: impl IntoIterator<Item = &'f Flow>, ws: Option<&WsStore>) -> Har {
     let entries = flows
         .into_iter()
-        .filter_map(|flow| match &flow.record {
-            Event::Exchange(x) => {
-                let mut entry = entry(x);
-                if let Some(ws) = ws.filter(|_| x.ws_messages.is_some()) {
-                    entry.web_socket_messages = ws
-                        .list(x.id, None, usize::MAX)
-                        .iter()
-                        .map(|m| HarWsMessage::from_message(m))
-                        .collect();
-                }
-                Some(entry)
-            }
-            Event::TlsFailure(_) | Event::Tunnel(_) => None,
-        })
+        .filter_map(|flow| flow_entry(flow, ws))
         .collect();
     Har {
         log: Log {
             version: "1.2".to_owned(),
-            creator: Creator {
-                name: NAME.to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            },
+            creator: creator(),
             entries,
         },
+    }
+}
+
+fn creator() -> Creator {
+    Creator {
+        name: NAME.to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
+/// The HAR entry of `flow`, with its WebSocket messages from `ws`; `None` for tunnels and
+/// failed handshakes.
+fn flow_entry(flow: &Flow, ws: Option<&WsStore>) -> Option<Entry> {
+    let Event::Exchange(x) = &flow.record else {
+        return None;
+    };
+    let mut entry = entry(x);
+    if let Some(ws) = ws.filter(|_| x.ws_messages.is_some()) {
+        entry.web_socket_messages = ws
+            .list(x.id, None, usize::MAX)
+            .iter()
+            .map(|m| HarWsMessage::from_message(m))
+            .collect();
+    }
+    Some(entry)
+}
+
+/// The document [`to_har_with_ws`] builds, serialised while each entry is made: serde writes
+/// the same bytes (compact or pretty), but only one entry exists in memory at a time.
+#[derive(Debug)]
+pub struct StreamedHar<'a, F> {
+    flows: &'a [F],
+    ws: Option<&'a WsStore>,
+}
+
+impl<'a, F: Borrow<Flow>> StreamedHar<'a, F> {
+    /// The HAR document of `flows` (exchanges only), with WebSocket messages from `ws`.
+    #[must_use]
+    pub fn new(flows: &'a [F], ws: Option<&'a WsStore>) -> Self {
+        Self { flows, ws }
+    }
+
+    /// How many entries the document has: the exchanges among the flows.
+    #[must_use]
+    pub fn entries(&self) -> usize {
+        let records = self.flows.iter().map(|f| &f.borrow().record);
+        records
+            .filter(|record| matches!(record, Event::Exchange(_)))
+            .count()
+    }
+}
+
+impl<F: Borrow<Flow>> Serialize for StreamedHar<'_, F> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let mut har = serializer.serialize_struct("Har", 1)?;
+        har.serialize_field("log", &StreamedLog(self))?;
+        har.end()
+    }
+}
+
+/// The `log` object of a [`StreamedHar`], field for field as [`Log`].
+struct StreamedLog<'s, 'a, F>(&'s StreamedHar<'a, F>);
+
+impl<F: Borrow<Flow>> Serialize for StreamedLog<'_, '_, F> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let StreamedHar { flows, ws } = *self.0;
+        let entries = flows.iter().filter_map(|f| flow_entry(f.borrow(), ws));
+        let mut log = serializer.serialize_struct("Log", 3)?;
+        log.serialize_field("version", "1.2")?;
+        log.serialize_field("creator", &creator())?;
+        log.serialize_field("entries", &Entries(RefCell::new(Some(entries))))?;
+        log.end()
+    }
+}
+
+/// A sequence serialised from an iterator, once.
+struct Entries<I>(RefCell<Option<I>>);
+
+impl<I: Iterator<Item = Entry>> Serialize for Entries<I> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let entries = self.0.borrow_mut().take();
+        serializer.collect_seq(entries.into_iter().flatten())
     }
 }
 
@@ -1198,6 +1268,39 @@ mod tests {
         assert_eq!(failed["response"]["status"], 0);
         assert_eq!(failed["_error"], "connection refused");
         assert_eq!(failed["timings"]["connect"], -1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_streamed_document_is_byte_for_byte_the_built_one() -> serde_json::Result<()> {
+        let mut flows = sample();
+        flows.insert(
+            1,
+            Flow::new(Event::Tunnel(crate::flow::Tunnel {
+                id: 9,
+                time: "2026-11-21T10:00:00.000Z".to_owned(),
+                client: SocketAddr::from(([127, 0, 0, 1], 5000)),
+                target: "db.test:5432".to_owned(),
+                bytes_up: 1,
+                bytes_down: 2,
+                error: None,
+                reason: None,
+                tls: None,
+                duration_ms: None,
+            })),
+        );
+        for set in [&flows[..], &flows[1..2], &[]] {
+            let streamed = StreamedHar::new(set, None);
+            let built = to_har(set);
+            assert_eq!(streamed.entries(), built.log.entries.len());
+            assert_eq!(serde_json::to_vec(&streamed)?, serde_json::to_vec(&built)?);
+            assert_eq!(
+                serde_json::to_string_pretty(&streamed)?,
+                serde_json::to_string_pretty(&built)?
+            );
+        }
+        let bytes = serde_json::to_vec(&StreamedHar::new(&flows, None))?;
+        assert_eq!(from_har(&bytes).map(|f| f.len()).ok(), Some(2));
         Ok(())
     }
 

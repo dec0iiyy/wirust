@@ -74,7 +74,10 @@ wirust import --har devtools.har --session imported.jsonl  # the output must not
 ```
 
 With `--ui`, `GET /api/v1/har?q=QUERY&limit=N` downloads the flows held in memory as
-`wirust-YYYYMMDD-HHMMSS.har` (`Content-Disposition: attachment`).
+`wirust-YYYYMMDD-HHMMSS.har` (`Content-Disposition: attachment`). The answer is streamed as a
+chunked body and `export` writes the file the same way: each entry is built while it is
+written, so memory stays near one entry whatever the size of the export (the API answer is
+compact JSON, the file is pretty-printed, both byte for byte as before).
 
 Export writes HAR 1.2. Only HTTP exchanges become entries; raw tunnels and failed handshakes
 have no HAR form. The mapping:
