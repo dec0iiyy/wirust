@@ -1,6 +1,5 @@
 //! Command-line entry point.
 
-use std::io::Write as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1530,7 +1529,8 @@ fn run(
         }
         start_schemas(schemas, control.as_ref());
         start_scripts(scripts.as_ref(), control.as_ref());
-        let printer = tokio::spawn(print_flows(proxy.subscribe(), args.json, args.ws_log));
+        let (log, log_writer) = console::spawn_writer().context("starting the log writer")?;
+        let printer = tokio::spawn(print_flows(proxy.subscribe(), log, args.json, args.ws_log));
         let control = control.map(|control| tokio::spawn(control.run()));
         let result = tokio::select! {
             result = proxy.run() => result,
@@ -1538,6 +1538,9 @@ fn run(
         };
         restore_system_proxy(system_proxy);
         printer.abort();
+        // Cancelled: the task's sender is dropped, so the writer can drain and stop.
+        let _ = printer.await;
+        finish_log(log_writer);
         if let Some(control) = control {
             control.abort();
         }
@@ -1673,38 +1676,45 @@ fn start_schemas(schemas: Option<wirust::schema::Schemas>, control: Option<&Cont
 /// In text mode, repeated TLS failures of one host and error are folded into a summary line
 /// (see [`Folder`]); the summary of a window that closes is printed on time even when no
 /// other event arrives. JSON output has one object per event and is never folded.
+///
+/// The lines go to the log writer thread (see [`console::spawn_writer`]), so a slow or stuck
+/// standard output never holds up this task; it stops once the output is closed.
 async fn print_flows(
     mut events: tokio::sync::broadcast::Receiver<FlowEvent>,
+    log: console::LogSender,
     json: bool,
     ws_log: WsLog,
 ) {
-    let mut stdout = std::io::stdout();
     let mut folder = Folder::new();
-    loop {
+    while !log.is_closed() {
         let received = match folder.next_deadline() {
             Some(deadline) => tokio::select! {
                 received = events.recv() => received,
                 () = tokio::time::sleep_until(deadline.into()) => {
-                    let lines = escape_lines(folder.expire(Instant::now()));
-                    if print_lines(&mut stdout, &lines).is_err() {
-                        break;
-                    }
+                    print_lines(&log, escape_lines(folder.expire(Instant::now())));
                     continue;
                 }
             },
             None => events.recv().await,
         };
-        let lines = match received {
-            Ok(event) => console_lines(&event, json, ws_log, &mut folder),
+        match received {
+            Ok(event) => print_lines(&log, console_lines(&event, json, ws_log, &mut folder)),
             Err(RecvError::Lagged(missed)) => {
-                eprintln!("{NAME}: the log fell behind and skipped {missed} events");
-                continue;
+                log.notice(format!(
+                    "{NAME}: the log fell behind and skipped {missed} events"
+                ));
             }
             Err(RecvError::Closed) => break,
-        };
-        if print_lines(&mut stdout, &lines).is_err() {
-            break;
         }
+    }
+}
+
+/// Waits briefly for the log writer to write what is queued, and reports on the standard
+/// error the lines a stuck output never took.
+fn finish_log(writer: console::LogWriter) {
+    let lost = writer.finish(Duration::from_secs(1));
+    if lost > 0 {
+        eprintln!("{NAME}: {lost} log lines dropped (the output is too slow)");
     }
 }
 
@@ -1742,12 +1752,11 @@ fn escape_lines(lines: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Writes each line and flushes, so a pipe sees them at once.
-fn print_lines(out: &mut std::io::Stdout, lines: &[String]) -> std::io::Result<()> {
+/// Queues each line for the standard output; the writer flushes as soon as it catches up.
+fn print_lines(log: &console::LogSender, lines: Vec<String>) {
     for line in lines {
-        writeln!(out, "{line}")?;
+        log.line(line);
     }
-    out.flush()
 }
 
 #[cfg(test)]

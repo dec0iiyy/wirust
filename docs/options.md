@@ -72,4 +72,11 @@ in full; the repeats within 30 seconds become one line such as
 `13:31:09 TLS-FAIL example.com (x4 more in the last 30 s)  received fatal alert: UnknownCA`.
 The UI, the session file and `--json` still have every failure.
 
+The log never slows the proxy down. A separate thread writes it, with a queue of 16,384
+lines; when the terminal or the program reading a pipe falls behind, new lines are dropped
+and, once the writer catches up, one line on the standard error says
+`wirust: N log lines dropped (the output is too slow)`. If the standard output is closed (the
+reader of a pipe exited), the proxy prints one line about it on the standard error, stops the
+log and keeps running: the UI, the API and the session file still get every flow.
+
 Requests to `http://wirust.test/` through the proxy get a page with the CA download.

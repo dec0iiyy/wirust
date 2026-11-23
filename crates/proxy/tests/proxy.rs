@@ -295,3 +295,74 @@ fn out_of_file_descriptors_does_not_stop_the_proxy() -> TestResult {
     assert!(answer?.starts_with("HTTP/1.1 "), "the proxy answers again");
     Ok(())
 }
+
+/// Sends one plain request through the proxy at `addr` and returns the status line.
+async fn plain_status_line(addr: &str, port: u16) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut client = TcpStream::connect(addr).await?;
+    let head =
+        format!("GET http://127.0.0.1:{port}/plain HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    client.write_all(head.as_bytes()).await?;
+    let mut status = [0; 15];
+    let read = client.read_exact(&mut status);
+    tokio::time::timeout(std::time::Duration::from_secs(10), read).await??;
+    Ok(String::from_utf8_lossy(&status).into_owned())
+}
+
+/// A closed standard output stops the exchange log with one line on the standard error; the
+/// proxy keeps forwarding.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_stdout_stops_the_log_not_the_proxy() -> TestResult {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let port = http_server().await?;
+    let dir = temp_dir();
+    let mut proxy = Command::new(env!("CARGO_BIN_EXE_wirust"))
+        .args(["--listen", "127.0.0.1:0", "--config-dir"])
+        .arg(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    drop(proxy.stdout.take());
+    let (lines, stderr_lines) = std::sync::mpsc::channel();
+    let stderr = BufReader::new(proxy.stderr.take().expect("piped stderr"));
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            let _ = lines.send(line);
+        }
+    });
+    let addr = loop {
+        let line = stderr_lines.recv_timeout(Duration::from_secs(30))?;
+        if let Some(rest) = line.split("listening on ").nth(1) {
+            break rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+        }
+    };
+    let mut answers = Vec::new();
+    for _ in 0..3 {
+        answers.push(plain_status_line(&addr, port).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let exited = proxy.try_wait()?;
+    let _ = proxy.kill();
+    let _ = proxy.wait();
+    // Ends when the reader thread sees the end of the dead proxy's standard error.
+    let notices: Vec<String> = stderr_lines
+        .iter()
+        .filter(|line| line.contains("standard output is closed"))
+        .collect();
+    std::fs::remove_dir_all(&dir)?;
+    assert!(exited.is_none(), "the proxy exited: {exited:?}");
+    for answer in answers {
+        assert_eq!(answer?, "HTTP/1.1 200 OK");
+    }
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    Ok(())
+}
